@@ -8,6 +8,19 @@ export default {
 
         const editable = ['Closed', 'archived'].indexOf(entry.task.status.status) === -1
 
+        // Build full task location string: "Space - Folder - List"
+        let taskLocation = `${entry.task_location.space_name}`;
+        if (entry.task_location.folder_name && entry.task_location.folder_name.indexOf('hidden') === -1) {
+            taskLocation += ` - ${entry.task_location.folder_name}`;
+        }
+        if (entry.task_location.list_name) {
+            taskLocation += ` - ${entry.task_location.list_name}`;
+        }
+
+        // Extract short project code (e.g. "KR-Hi-01") from location if present, else fall back to space name
+        let taskLocationShort = /KR-\w\w-\d\d/i.exec(taskLocation);
+        taskLocationShort = taskLocationShort ? taskLocationShort[0] : entry.task_location.space_name;
+
         return {
             entryId: entry.id,
             taskId: entry.task.id,
@@ -16,6 +29,9 @@ export default {
             spaceId: entry.task_location.space_id,
             // Prefer name from API if provided (we pass include_location_names=true)
             spaceName: entry.task_location && (entry.task_location.space_name || entry.task_location.space) || undefined,
+            listName: entry.task_location && entry.task_location.list_name || undefined,
+            taskLocation: taskLocation,
+            taskLocationShort: taskLocationShort,
             description: entry.description,
             start: new Date(Number(entry.start)),
             end: new Date(Number(entry.start) + Number(entry.duration)),
@@ -64,6 +80,9 @@ export default {
             taskUrl: `https://app.clickup.com/t/${remote.task.id}`,
             title: remote.task.name,
             spaceName: original.spaceName || (remote.task && remote.task.space && remote.task.space.name) || original.spaceName,
+            listName: original.listName,
+            taskLocation: original.taskLocation,
+            taskLocationShort: original.taskLocationShort,
             description: remote.description,
             start: new Date(Number(remote.start)),
             end: new Date(Number(remote.start) + Number(remote.duration)),
