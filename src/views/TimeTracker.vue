@@ -148,11 +148,11 @@
         </div>
 
         <!-- START | Time from/to -->
-        <div class="vuecal__event-time dark:text-gray-400"
+        <div v-if="store.get('settings.show_start_end_time') !== false || store.get('settings.show_duration') !== false"
+          class="vuecal__event-time flex justify-between dark:text-gray-400"
           :class="{ 'opacity-50': deletingEntryIds.includes(event.entryId) }">
-          {{ event.start.formatTime('HH:mm') }}
-          <span class="mx-1">-</span>
-          {{ event.end.formatTime('HH:mm') }}
+          <span v-if="store.get('settings.show_start_end_time') !== false">{{ event.start.formatTime('HH:mm') }}<span class="opacity-40">…</span>{{ event.end.formatTime('HH:mm') }}</span>
+          <span v-if="store.get('settings.show_duration') !== false">{{ formatDuration(event.end - event.start) }}</span>
         </div>
         <!-- END | Time from/to -->
       </template>
@@ -241,7 +241,7 @@ import store from "@/store";
 import { isEmptyObject } from "@/helpers";
 import eventFactory from "@/events-factory";
 import clickupService from "@/clickup-service";
-import { totalHoursOnDate as totalHoursOnDateUtil, hasTimeTrackedOn as hasTimeTrackedOnUtil } from "@/utils/time-utils";
+import { totalHoursOnDate as totalHoursOnDateUtil, hasTimeTrackedOn as hasTimeTrackedOnUtil, formatDuration } from "@/utils/time-utils";
 
 import MemberSelector from '@/components/MemberSelector'
 import TimeTrackingStatistics from '@/components/TimeTrackingStatistics'
@@ -314,6 +314,7 @@ export default {
       selectedTask: ref({}),
       totalHoursOnDate: totalHoursOnDateUtil,
       hasTimeTrackedOn: hasTimeTrackedOnUtil,
+      formatDuration,
 
       start_date: ref(new Date()),
       end_date: ref(new Date()),

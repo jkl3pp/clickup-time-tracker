@@ -65,6 +65,22 @@
           <label class="ml-3 text-gray-800 dark:text-gray-200">Enable statistics</label>
         </n-form-item>
 
+        <n-form-item :show-feedback="false" :show-label="false" path="show_start_end_time">
+          <n-switch v-model:value="model.show_start_end_time" :default-value="true" />
+          <label class="ml-3 text-gray-800 dark:text-gray-200">
+            Start and End time
+            <div class="text-sm text-gray-500 dark:text-gray-400">Show Start and End time of time entries</div>
+          </label>
+        </n-form-item>
+
+        <n-form-item :show-feedback="false" :show-label="false" path="show_duration">
+          <n-switch v-model:value="model.show_duration" :default-value="true" />
+          <label class="ml-3 text-gray-800 dark:text-gray-200">
+            Duration
+            <div class="text-sm text-gray-500 dark:text-gray-400">Show Duration of time entries</div>
+          </label>
+        </n-form-item>
+
         <hr class="my-6 dark:border-gray-700" />
         <!-- START | Hierarchy Selection -->
         <label class="absolute px-1.5 bg-white dark:bg-gray-800 -ml-4 -mt-9">Hierarchy Selection</label>

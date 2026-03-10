@@ -57,6 +57,19 @@ export function totalHoursOnDate(events, date) {
 }
 
 /**
+ * Format a duration in milliseconds as "HHhMMm".
+ *
+ * @param {number} ms
+ * @returns {string}
+ */
+export function formatDuration(ms) {
+  const totalMinutes = Math.round(ms / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours >= 1 ? `${hours}h ${String(minutes).padStart(2, '0')}m` : `${minutes}m`;
+}
+
+/**
  * Check if there is at least one event tracked on a given date
  *
  * @param {Date} date
