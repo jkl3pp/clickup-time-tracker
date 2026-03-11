@@ -75,9 +75,9 @@
     <template v-slot:event="{ event }" >
 
         <div class="vuecal__event-title">
-            <span class="dark:text-gray-100 align-baseline">
+            <span class="dark:text-gray-100">
                 {{ event.title }}
-                <span v-if="event.spaceName" class="ml-1 text-xs text-gray-600 dark:text-gray-400 font-normal align-baseline">({{ event.spaceName }})</span>
+                <span v-if="event.taskLocationShort" class="block text-xs text-gray-500 dark:text-gray-400 font-normal">{{ event.taskLocationShort }}</span>
             </span>
 
             <!-- START | Task context popover -->
@@ -90,9 +90,9 @@
                 </template>
 
                 <template #header>
-                    <span class="font-semibold text-gray-700 dark:text-gray-200 align-baseline">
+                    <span class="font-semibold text-gray-700 dark:text-gray-200">
                         {{ event.title }}
-                        <span v-if="event.spaceName" class="ml-1 text-xs text-gray-500 dark:text-gray-400 font-normal align-baseline">({{ event.spaceName }})</span>
+                        <span v-if="event.taskLocationShort" class="block text-xs text-gray-500 dark:text-gray-400 font-normal">{{ event.taskLocationShort }}</span>
                     </span>
                 </template>
 
@@ -116,10 +116,10 @@
         </div>
 
         <!-- START | Time from/to -->
-        <div class="vuecal__event-time dark:text-gray-200">
-            {{ event.start.formatTime('HH:mm') }}
-            <span class="mx-1">-</span>
-            {{ event.end.formatTime('HH:mm') }}
+        <div v-if="store.get('settings.show_start_end_time') !== false || store.get('settings.show_duration') !== false"
+          class="vuecal__event-time flex justify-between dark:text-gray-400">
+          <span v-if="store.get('settings.show_start_end_time') !== false">{{ event.start.formatTime('HH:mm') }}<span class="opacity-40">…</span>{{ event.end.formatTime('HH:mm') }}</span>
+          <span v-if="store.get('settings.show_duration') !== false">{{ formatDuration(event.end - event.start) }}</span>
         </div>
         <!-- END | Time from/to -->
 
@@ -138,9 +138,9 @@
       aria-modal="true"
     >
       <template #header>
-        <span class="font-semibold text-gray-700 dark:text-gray-200 align-baseline">
+        <span class="font-semibold text-gray-700 dark:text-gray-200">
           {{ selectedTask.title }}
-          <span v-if="selectedTask.spaceName" class="ml-1 text-xs text-gray-500 dark:text-gray-400 font-normal align-baseline">({{ selectedTask.spaceName }})</span>
+          <span v-if="selectedTask.taskLocationShort" class="block text-xs text-gray-500 dark:text-gray-400 font-normal">{{ selectedTask.taskLocationShort }}</span>
         </span>
       </template>
       <n-space vertical>
@@ -170,7 +170,7 @@ import { InformationCircleIcon, CogIcon, UserIcon } from "@heroicons/vue/20/soli
 import { ClockIcon, PencilIcon } from "@heroicons/vue/24/outline";
 import { NModal,  NCard,  NSpace, NPopover,  useNotification } from "naive-ui";
 import MemberSelector from '@/components/MemberSelector'
-import { totalHoursOnDate as totalHoursOnDateUtil, hasTimeTrackedOn as hasTimeTrackedOnUtil } from '@/utils/time-utils'
+import { totalHoursOnDate as totalHoursOnDateUtil, hasTimeTrackedOn as hasTimeTrackedOnUtil, formatDuration } from '@/utils/time-utils'
 
 export default {
   components: { MemberSelector, VueCal, RouterLink, NModal, NCard, NSpace, NPopover, CogIcon, UserIcon, ClockIcon, PencilIcon, InformationCircleIcon },
@@ -191,6 +191,7 @@ export default {
       showTaskDetailsModal: ref(false),
       totalHoursOnDate: totalHoursOnDateUtil,
       hasTimeTrackedOn: hasTimeTrackedOnUtil,
+      formatDuration,
 
       error(options) {
         notification.error({ duration: 5000, ...options });

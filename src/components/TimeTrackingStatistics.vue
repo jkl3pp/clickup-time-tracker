@@ -1,12 +1,13 @@
 <script setup>
-import {ref, watch, watchEffect} from "vue"
+import { ref, watch, watchEffect } from "vue"
 import clickupService from "@/clickup-service";
-import {ArcElement, BarElement, CategoryScale, Chart as ChartJS, Legend, LinearScale, Title, Tooltip} from 'chart.js'
-import {Bar, Doughnut} from 'vue-chartjs'
+import { ArcElement, BarElement, CategoryScale, Chart as ChartJS, Legend, LinearScale, Title, Tooltip } from 'chart.js'
+import { Bar, Doughnut } from 'vue-chartjs'
 import store from "@/store";
 import GoalGraph from "@/components/GoalGraph.vue";
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend, ArcElement)
+ChartJS.defaults.font.family = 'Avenir, Helvetica, Arial, sans-serif'
 
 const props = defineProps({
   open: Boolean,
@@ -17,9 +18,10 @@ const props = defineProps({
 
 let loading = ref(false);
 let goals = store.get("settings.goals")
+let goalsEnabled = store.get("settings.enable_goals") !== false
 
 // Days of week chart
-let daysOfWeekChartData = ref({datasets: []});
+let daysOfWeekChartData = ref({ datasets: [] });
 let daysOfWeekChartOptions = ref({
   plugins: {
     title: {
@@ -28,6 +30,8 @@ let daysOfWeekChartOptions = ref({
   },
   maintainAspectRatio: false,
   responsive: true,
+  barPercentage: 1.0,
+  categoryPercentage: 1.0,
   scales: {
     x: {
       stacked: true,
@@ -44,7 +48,7 @@ let daysOfWeekChartStyles = ref({
 })
 
 // Week chart
-let weekChartData = ref({datasets: []});
+let weekChartData = ref({ datasets: [] });
 let weekChartOptions = ref({
   responsive: true,
   maintainAspectRatio: true,
@@ -98,9 +102,11 @@ async function onCreate() {
 async function buildEventsData(events, spaces) {
   await Promise.all(events.map(async event => {
     let foundSpace = spaces.find(space => space.id === event.spaceId);
+    const baseColor = (foundSpace && foundSpace.color) ? foundSpace.color : "#ADD8E6"
     return {
       spaceName: (foundSpace) ? foundSpace.name : "Unknown space",
-      color: (foundSpace) ? foundSpace.color : "#ADD8E67F",
+      color: baseColor + '59',
+      colorSolid: baseColor,
       startDate: new Date(event.start).toLocaleDateString('en-CA'),
       endDate: new Date(event.end).toLocaleDateString('en-CA'),
       durationInHours: (new Date(event.end) - new Date(event.start)) / 3600000
@@ -137,6 +143,9 @@ async function buildDaysOfWeekChart(processedEvents) {
       return {
         label: space,
         backgroundColor: spaceEvents[0].color,
+        borderColor: spaceEvents[0].colorSolid,
+        borderWidth: { left: 4, top: 0, right: 0, bottom: 0 },
+        borderSkipped: false,
         data: spaceEventsDuration
       }
     })
@@ -156,9 +165,11 @@ async function buildWeekChart(processedEvents) {
   }, {});
 
   let colors = []
+  let solidColors = []
   for (let spaceGroupedEvent in groupedEvents) {
     let foundSpace = processedEvents.find(event => event.spaceName === spaceGroupedEvent)
     colors.push(foundSpace.color)
+    solidColors.push(foundSpace.colorSolid)
   }
 
   weekChartData.value = {
@@ -166,7 +177,8 @@ async function buildWeekChart(processedEvents) {
     datasets: [{
       data: Object.values(groupedEvents),
       backgroundColor: colors,
-      borderWidth: 0
+      borderColor: solidColors,
+      borderWidth: 3
     }]
   }
 }
@@ -177,7 +189,7 @@ async function buildWeekChart(processedEvents) {
 <template>
   <Transition name="time-tracking-statistics">
     <div v-show="open"
-         class="time-tracking-statistics select-none bg-white flex fixed top-0 inset-x-0 bg-white z-10 shadow-inner drop-shadow-xl h-[500px]">
+      class="time-tracking-statistics select-none bg-gray-50 dark:bg-gray-800 flex fixed top-0 inset-x-0 z-10 shadow-inner h-[500px]">
       <!-- TODO: Implement this -->
       <!-- START: Loading state -->
       <div v-if="loading" class="flex justify-center items-center h-full w-full">
@@ -192,25 +204,21 @@ async function buildWeekChart(processedEvents) {
 
       <div v-if="!loading && events.length" class="self-center w-full text-center">
         <div
-            class="items-end h-full w-full pl-3 pb-1 overflow-x-scroll align-text-top grid grid-rows-2 gap-1 statistics-container">
+          class="items-end h-full w-full pl-3 pb-1 overflow-x-scroll align-text-top grid grid-rows-2 gap-1 statistics-container">
           <div class="grid grid-cols-3 gap-4">
             <div class="chart-container">
               <Doughnut :data="weekChartData" :options="weekChartOptions" :style="weekChartStyles"
-                        :plugins="[weekChartPlugins]"/>
+                :plugins="[weekChartPlugins]" />
             </div>
-            <div class="col-span-2 chart-container bg-white border rounded-lg shadow-sm mr-2.5">
-              <label class="absolute bg-white px-1.5 -left-0.5 -top-3">Goals</label>
-              <GoalGraph
-                  v-for="(goal, index) in goals"
-                  :key="index"
-                  :goal="goal"
-                  :start_date="props.start_date"
-                  :end_date="props.end_date"
-              />
+            <div v-if="goalsEnabled"
+              class="col-span-2 chart-container bg-gray-50 dark:bg-gray-800 border rounded-lg shadow-sm mr-2.5">
+              <label class="absolute bg-gray-50 dark:bg-gray-800 px-1.5 -left-0.5 -top-3">Goals</label>
+              <GoalGraph v-for="(goal, index) in goals" :key="index" :goal="goal" :start_date="props.start_date"
+                :end_date="props.end_date" />
             </div>
           </div>
           <div class="">
-            <Bar :data="daysOfWeekChartData" :options="daysOfWeekChartOptions" :style="daysOfWeekChartStyles"/>
+            <Bar :data="daysOfWeekChartData" :options="daysOfWeekChartOptions" :style="daysOfWeekChartStyles" />
           </div>
         </div>
       </div>

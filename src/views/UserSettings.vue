@@ -14,11 +14,7 @@
       </n-form-item>
       <div class="flex space-x-4">
         <n-form-item label="Day starts at" path="day_start" class="flex-grow">
-          <n-select
-              v-model:value="model.day_start"
-              :options="hours"
-              class="dark:bg-gray-800 dark:text-gray-200"
-          >
+          <n-select v-model:value="model.day_start" :options="hours" class="dark:bg-gray-800 dark:text-gray-200">
             <template #arrow>
               <ClockIcon class="w-4 dark:text-gray-300" />
             </template>
@@ -26,11 +22,7 @@
         </n-form-item>
 
         <n-form-item label="Day ends at" path="day_end" class="flex-grow">
-          <n-select
-              v-model:value="model.day_end"
-              :options="hours"
-              class="dark:bg-gray-800 dark:text-gray-200"
-          >
+          <n-select v-model:value="model.day_end" :options="hours" class="dark:bg-gray-800 dark:text-gray-200">
             <template #arrow>
               <ClockIcon class="w-4 dark:text-gray-300" />
             </template>
@@ -47,11 +39,6 @@
           <label class="ml-3 text-gray-800 dark:text-gray-200">Show weekends</label>
         </n-form-item>
 
-        <n-form-item :show-feedback="false" :show-label="false" path="require_description">
-          <n-switch v-model:value="model.require_description" :default-value="false" />
-          <label class="ml-3 text-gray-800 dark:text-gray-200">Require descriptions</label>
-        </n-form-item>
-
         <n-form-item :show-feedback="false" :show-label="false" path="admin_features_enabled">
           <n-switch v-model:value="model.admin_features_enabled" :default-value="false" />
           <label class="ml-3 text-gray-800 dark:text-gray-200">
@@ -62,7 +49,7 @@
 
         <n-form-item :show-feedback="false" :show-label="false" path="enable_statistics">
           <n-switch v-model:value="model.enable_statistics" :default-value="false" />
-          <label class="ml-3 text-gray-800 dark:text-gray-200">Enable statistics</label>
+          <label class="ml-3 text-gray-800 dark:text-gray-200">Enable Statistics view</label>
         </n-form-item>
 
         <n-form-item :show-feedback="false" :show-label="false" path="show_start_end_time">
@@ -79,6 +66,17 @@
             Duration
             <div class="text-sm text-gray-500 dark:text-gray-400">Show Duration of time entries</div>
           </label>
+        </n-form-item>
+
+        <n-form-item :show-feedback="false" :show-label="false" path="require_description">
+          <n-switch v-model:value="model.require_description" :default-value="false" />
+          <label class="ml-3 text-gray-800 dark:text-gray-200">
+            Require descriptions
+            <div class="text-sm text-gray-500 dark:text-gray-400">Leave task IDs empty to require for all tasks</div>
+          </label>
+        </n-form-item>
+        <n-form-item :show-label="false" :show-feedback="false" path="internal_task_id" class="mt-1 ml-12">
+          <n-input v-model:value="model.internal_task_id" :disabled="!model.require_description" placeholder="Task IDs, comma-separated (optional)" clearable class="dark:bg-gray-800 dark:text-gray-200" />
         </n-form-item>
 
         <hr class="my-6 dark:border-gray-700" />
@@ -114,24 +112,14 @@
           </div>
 
           <n-form-item v-if="hierarchyLoaded" label="Select items to track" path="hierarchy_filter.selection">
-            <n-tree-select
-                v-model:value="selectedHierarchyKeys"
-                :options="hierarchyTreeOptions"
-                :checkable="true"
-                :cascade="true"
-                :check-strategy="'parent'"
-                :show-path="true"
-                :multiple="true"
-                :default-expand-all="false"
-                :filterable="true"
-                :render-prefix="renderHierarchyIcon"
-                placeholder="Select lists to track..."
-                class="w-full dark:bg-gray-800 dark:text-gray-200"
-            />
+            <n-tree-select v-model:value="selectedHierarchyKeys" :options="hierarchyTreeOptions" :checkable="true"
+              :cascade="true" :check-strategy="'parent'" :show-path="true" :multiple="true" :default-expand-all="false"
+              :filterable="true" :render-prefix="renderHierarchyIcon" placeholder="Select lists to track..."
+              class="w-full dark:bg-gray-800 dark:text-gray-200" />
           </n-form-item>
 
           <div v-if="hierarchyLoaded && selectedHierarchyKeys.length === 0"
-               class="text-yellow-600 dark:text-yellow-400 text-sm">
+            class="text-yellow-600 dark:text-yellow-400 text-sm">
             ⚠️ No items selected - no tasks will be available
           </div>
         </div>
@@ -155,12 +143,8 @@
           </n-form-item>
 
           <n-form-item :show-label="false" :show-feedback="false" class="w-full" path="color">
-            <n-color-picker
-                v-model:value="model.color"
-                :disabled="!(model.custom_color_enabled)"
-                :modes="['hex']"
-                class="w-full"
-            />
+            <n-color-picker v-model:value="model.color" :disabled="!(model.custom_color_enabled)" :modes="['hex']"
+              class="w-full" />
           </n-form-item>
         </div>
 
@@ -169,39 +153,24 @@
 
         <!-- START | Goals -->
         <label class="absolute px-1.5 bg-white dark:bg-gray-800 -ml-4 -mt-9">Goals</label>
+        <n-form-item :show-feedback="false" :show-label="false" path="enable_goals">
+          <n-switch v-model:value="model.enable_goals" :default-value="true" :disabled="!model.enable_statistics"
+            @update:value="val => { if (val) model.enable_statistics = true }" />
+          <label class="ml-3 text-gray-800 dark:text-gray-200">Show goals in statistics</label>
+        </n-form-item>
         <n-form-item :show-label="false" :show-feedback="false" path="goals">
-          <n-dynamic-input
-              v-model:value="model.goals"
-              :on-create="onAddGoal"
-              :disabled="!model.enable_statistics"
-              :min="0"
-              :max="4"
-          >
+          <n-dynamic-input v-model:value="model.goals" :on-create="onAddGoal" :disabled="!model.enable_statistics"
+            :min="0" :max="4">
             <template #create-button-default>
               Add a goal
             </template>
-            <template #default="{value}">
+            <template #default="{ value }">
               <div style="display: flex; align-items: center; width: 100%">
-                <n-select
-                    v-model:value="value.type"
-                    :options="clickUpTypeOptions"
-                    :render-label="renderDropDownIcon"
-                    class="mr-2.5 dark:bg-gray-800 dark:text-gray-200"
-                    style="width: 200px"
-                    placeholder="Type"
-                />
-                <n-input
-                    v-model:value="value.clickUpId"
-                    placeholder="ClickUp Id"
-                    type="text"
-                    class="mr-2.5 dark:bg-gray-800 dark:text-gray-200"
-                />
-                <n-input-number
-                    v-model:value="value.goal"
-                    :min="0"
-                    :max="168"
-                    style="width: 175px"
-                />
+                <n-select v-model:value="value.type" :options="clickUpTypeOptions" :render-label="renderDropDownIcon"
+                  class="mr-2.5 dark:bg-gray-800 dark:text-gray-200" style="width: 200px" placeholder="Type" />
+                <n-input v-model:value="value.clickUpId" placeholder="ClickUp Id" type="text"
+                  class="mr-2.5 dark:bg-gray-800 dark:text-gray-200" />
+                <n-input-number v-model:value="value.goal" :min="0" :max="168" style="width: 175px" />
               </div>
             </template>
           </n-dynamic-input>
@@ -246,23 +215,24 @@
       <h2 class="text-lg font-bold text-gray-700 dark:text-gray-200">Keybindings</h2>
 
       <div class="flex">
-        <kbd class="inline-flex items-center px-2 mr-2 font-sans text-sm font-medium text-gray-400 dark:text-gray-300 border border-gray-300 dark:border-gray-600 rounded">
+        <kbd
+          class="inline-flex items-center px-2 mr-2 font-sans text-sm font-medium text-gray-400 dark:text-gray-300 border border-gray-300 dark:border-gray-600 rounded">
           ⌘ + D
         </kbd>
         Duplicate the selected entry
       </div>
       <div class="flex">
         <kbd
-            class="inline-flex items-center px-2 mr-2 font-sans text-sm font-medium text-gray-400 border border-gray-300 rounded dark:text-gray-300 dark:border-gray-600">
+          class="inline-flex items-center px-2 mr-2 font-sans text-sm font-medium text-gray-400 border border-gray-300 rounded dark:text-gray-300 dark:border-gray-600">
           ⌘ +
-          <backspace-icon class="w-4 ml-1 dark:text-gray-300"/>
+          <backspace-icon class="w-4 ml-1 dark:text-gray-300" />
         </kbd>
         <span class="text-gray-800 dark:text-gray-200">Delete the selected entry</span>
       </div>
 
       <div class="flex">
         <kbd
-            class="inline-flex items-center px-2 mr-2 font-sans text-sm font-medium text-gray-400 border border-gray-300 rounded dark:text-gray-300 dark:border-gray-600">
+          class="inline-flex items-center px-2 mr-2 font-sans text-sm font-medium text-gray-400 border border-gray-300 rounded dark:text-gray-300 dark:border-gray-600">
           ⌘ + X
         </kbd>
         <span class="text-gray-800 dark:text-gray-200">Refresh background image cache</span>
@@ -270,7 +240,7 @@
 
       <div class="flex">
         <kbd
-            class="inline-flex items-center px-2 mr-2 font-sans text-sm font-medium text-gray-400 border border-gray-300 rounded dark:text-gray-300 dark:border-gray-600">
+          class="inline-flex items-center px-2 mr-2 font-sans text-sm font-medium text-gray-400 border border-gray-300 rounded dark:text-gray-300 dark:border-gray-600">
           ⌘ + R
         </kbd>
         <span class="text-gray-800 dark:text-gray-200">Refresh the current screen (for troubleshooting)</span>
@@ -278,12 +248,12 @@
 
       <div class="flex">
         <kbd
-            class="inline-flex items-center px-2 mr-2 font-sans text-sm font-medium text-gray-400 border border-gray-300 rounded dark:text-gray-300 dark:border-gray-600">
+          class="inline-flex items-center px-2 mr-2 font-sans text-sm font-medium text-gray-400 border border-gray-300 rounded dark:text-gray-300 dark:border-gray-600">
           ⌘ + V
         </kbd>
         <span class="text-gray-800 dark:text-gray-200">alias for</span>
         <kbd
-            class="inline-flex items-center px-2 ml-2 font-sans text-sm font-medium text-gray-400 border border-gray-300 rounded dark:text-gray-300 dark:border-gray-600">
+          class="inline-flex items-center px-2 ml-2 font-sans text-sm font-medium text-gray-400 border border-gray-300 rounded dark:text-gray-300 dark:border-gray-600">
           ⌘ + D
         </kbd>
       </div>
@@ -292,8 +262,8 @@
 </template>
 
 <script>
-import {h, ref, onMounted} from "vue";
-import {useRouter} from "vue-router";
+import { h, ref, onMounted } from "vue";
+import { useRouter } from "vue-router";
 import {
   NForm,
   NFormItem,
@@ -309,15 +279,15 @@ import {
   NIcon,
   NTreeSelect
 } from "naive-ui";
-import {BackspaceIcon, ClockIcon, ArrowPathIcon} from "@heroicons/vue/24/outline";
-import {ipcRenderer} from 'electron';
+import { BackspaceIcon, ClockIcon, ArrowPathIcon } from "@heroicons/vue/24/outline";
+import { ipcRenderer } from 'electron';
 import clickupService from '@/clickup-service';
 import store from "@/store";
 import cache from "@/cache";
-import {ClickUpType} from "@/model/ClickUpModels";
+import { ClickUpType } from "@/model/ClickUpModels";
 
-import {Planet, List, Folder} from '@vicons/ionicons5'
-import {CircleFilled} from "@vicons/carbon";
+import { Planet, List, Folder } from '@vicons/ionicons5'
+import { CircleFilled } from "@vicons/carbon";
 
 export default {
   components: {
@@ -342,7 +312,7 @@ export default {
     const router = useRouter();
     const notification = useNotification();
     const model = ref(store.get("settings") || {});
-    const hours = ref(Array.from(Array(25).keys()).map((i) => ({label: `${i}:00`, value: i})));
+    const hours = ref(Array.from(Array(25).keys()).map((i) => ({ label: `${i}:00`, value: i })));
     let custom_color = ref(false);
 
     // Initialize hierarchy_filter if not exists
@@ -426,7 +396,7 @@ export default {
         }
 
         hierarchyLoaded.value = true;
-        notification.success({title: "Hierarchy loaded!", duration: 1500});
+        notification.success({ title: "Hierarchy loaded!", duration: 1500 });
       } catch (error) {
         clearTimeout(loadingTimeout); // Clear timeout on error too
         console.error(error);
@@ -457,7 +427,7 @@ export default {
           icon = List;
       }
 
-      return h(NIcon, {size: '15px', color: color}, {default: () => h(icon)});
+      return h(NIcon, { size: '15px', color: color }, { default: () => h(icon) });
     }
 
     function selectAllHierarchy() {
@@ -662,7 +632,7 @@ export default {
 
       // Either the CU access token or team id has changed
       const credentialsChanged = model.value.clickup_access_token !== store.get('settings.clickup_access_token')
-          || model.value.clickup_team_id !== store.get('settings.clickup_team_id');
+        || model.value.clickup_team_id !== store.get('settings.clickup_team_id');
 
       // Hierarchy filter changed
       const filterChanged = JSON.stringify(oldFilter) !== JSON.stringify(newFilter);
@@ -674,7 +644,7 @@ export default {
     onMounted(() => {
       if (model.value.hierarchy_filter?.enabled) {
         const hasSelection = model.value.hierarchy_filter.selection?.spaces &&
-            Object.keys(model.value.hierarchy_filter.selection.spaces).length > 0;
+          Object.keys(model.value.hierarchy_filter.selection.spaces).length > 0;
 
         // Only load if we don't already have the hierarchy data
         if (hasSelection && hierarchyTreeOptions.value.length === 0) {
@@ -706,45 +676,45 @@ export default {
       renderDropDownIcon: (option) => {
         return [
           h('div', { style: 'display: flex; align-items: center;' }, [
-            h(NIcon, {size: '15px', id: 'cascader-icon'}, {default: () => h(option.icon)}),
-            h('span', { style: 'margin-left: 8px;'}, option.label)
+            h(NIcon, { size: '15px', id: 'cascader-icon' }, { default: () => h(option.icon) }),
+            h('span', { style: 'margin-left: 8px;' }, option.label)
           ])
         ]
       },
 
       persist() {
         form.value
-            .validate()
-            .then(() => {
-              // Convert selectedHierarchyKeys back to nested structure
-              if (model.value.hierarchy_filter?.enabled && hierarchyLoaded.value) {
-                model.value.hierarchy_filter.selection = buildSelectionStructure(
-                    selectedHierarchyKeys.value,
-                    hierarchyTreeOptions.value
-                );
-              }
+          .validate()
+          .then(() => {
+            // Convert selectedHierarchyKeys back to nested structure
+            if (model.value.hierarchy_filter?.enabled && hierarchyLoaded.value) {
+              model.value.hierarchy_filter.selection = buildSelectionStructure(
+                selectedHierarchyKeys.value,
+                hierarchyTreeOptions.value
+              );
+            }
 
-              if (mustFlushCachesAfterPersist()) {
-                cache.flush();
-              }
+            if (mustFlushCachesAfterPersist()) {
+              cache.flush();
+            }
 
-              store.set({settings: model.value});
+            store.set({ settings: model.value });
 
-              router.replace({name: "time-tracker"});
+            router.replace({ name: "time-tracker" });
 
-              notification.success({title: "Settings saved!", duration: 1500});
-            })
-            .catch((errors) => console.error(errors));
+            notification.success({ title: "Settings saved!", duration: 1500 });
+          })
+          .catch((errors) => console.error(errors));
       },
 
       cancel() {
-        router.replace({name: "time-tracker"});
+        router.replace({ name: "time-tracker" });
       },
 
       flushCaches() {
         cache.flush()
 
-        notification.success({title: "All caches flushed!", duration: 1500});
+        notification.success({ title: "All caches flushed!", duration: 1500 });
       },
 
       setDefaultColor(event) {

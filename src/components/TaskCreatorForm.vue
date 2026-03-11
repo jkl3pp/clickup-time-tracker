@@ -67,8 +67,15 @@ const rules = ref({
       message: 'Please select a task'
     },
     description: {
-      required: store.get('settings.requireDescription'),
-      message: 'Please describe what you worked on',
+      validator(rule, value) {
+        const requireDescriptions = store.get('settings.require_description')
+        const internalTaskIds = (store.get('settings.internal_task_id') || '').split(',').map(id => id.trim()).filter(Boolean)
+        const requireForThisTask = requireDescriptions && (internalTaskIds.length === 0 || internalTaskIds.includes(formValue.value.task.taskId))
+        if (requireForThisTask && !value) {
+          return new Error('Please describe what you worked on')
+        }
+        return true
+      },
       trigger: ['blur']
     },
   },
