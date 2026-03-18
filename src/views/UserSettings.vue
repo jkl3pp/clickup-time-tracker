@@ -126,6 +126,39 @@
 
         <hr class="my-6 dark:border-gray-700" />
         <!-- END | Hierarchy Selection -->
+
+        <!-- START | Search Shortcuts -->
+        <label class="absolute px-1.5 bg-white dark:bg-gray-800 -ml-4 -mt-9">Search Shortcuts</label>
+
+        <div v-if="!hierarchyLoaded" class="mb-4 flex items-center gap-2">
+          <n-button @click="loadHierarchyForSelection(hierarchyLoaded)" :loading="loadingHierarchy" secondary
+            size="small">
+            <template #icon><arrow-path-icon class="w-4" /></template>
+            Load hierarchy
+          </n-button>
+          <span class="text-sm text-gray-500 dark:text-gray-400">Required to configure shortcuts</span>
+        </div>
+
+        <n-form-item :show-label="false" :show-feedback="false" path="search_shortcuts">
+          <n-dynamic-input v-model:value="model.search_shortcuts" :on-create="onAddShortcut" :min="0" :max="10">
+            <template #create-button-default>
+              Add a shortcut
+            </template>
+            <template #default="{ value }">
+              <div style="display: flex; align-items: center; width: 100%; gap: 8px">
+                <n-input v-model:value="value.keyword" placeholder="Keyword" type="text"
+                  class="dark:bg-gray-800 dark:text-gray-200" style="width: 120px; flex-shrink: 0" />
+                <n-tree-select v-model:value="value.selectedKeys" :options="hierarchyTreeOptions" :checkable="true"
+                  :cascade="true" :check-strategy="'parent'" :multiple="true" :filterable="true"
+                  :render-prefix="renderHierarchyIcon" :disabled="!hierarchyLoaded"
+                  placeholder="Select spaces, folders or lists..."
+                  class="dark:bg-gray-800 dark:text-gray-200" style="flex: 1" />
+              </div>
+            </template>
+          </n-dynamic-input>
+        </n-form-item>
+        <hr class="my-6 dark:border-gray-700" />
+        <!-- END | Search Shortcuts -->
         <!-- END | Feature toggles -->
 
         <!-- START | Styling -->
@@ -375,6 +408,8 @@ export default {
         const hierarchy = await new Promise((resolve, reject) => {
           // Use refresh handler if forceRefresh is true (clears cache)
           const eventName = forceRefresh ? "refresh-clickup-hierarchy-metadata" : "get-clickup-hierarchy-metadata";
+          ipcRenderer.removeAllListeners("set-clickup-hierarchy-metadata");
+          ipcRenderer.removeAllListeners("fetch-clickup-hierarchy-metadata-error");
           ipcRenderer.send(eventName);
           ipcRenderer.once("set-clickup-hierarchy-metadata", (event, data) => {
             resolve(data);
@@ -728,6 +763,13 @@ export default {
           type: undefined,
           clickUpId: undefined,
           goal: 0
+        }
+      },
+
+      onAddShortcut() {
+        return {
+          keyword: '',
+          selectedKeys: [],
         }
       },
 

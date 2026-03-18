@@ -137,6 +137,8 @@ async function getClickUpHierarchy() {
   }, 200); // Only show loading if it takes more than 200ms
 
   new Promise((resolve, reject) => {
+    ipcRenderer.removeAllListeners("set-clickup-hierarchy");
+    ipcRenderer.removeAllListeners("fetch-clickup-hierarchy-error");
     ipcRenderer.send("get-clickup-hierarchy");
     console.info("Fetching Clickup hierarchy (from cache when available)...");
     ipcRenderer.once("set-clickup-hierarchy", (event, hierarchy) => {
@@ -154,6 +156,7 @@ async function getClickUpHierarchy() {
 
   }).then((hierarchy) => {
     clearTimeout(loadingTimeout); // Clear timeout when data arrives
+    buildAncestorIds(hierarchy)
     clickUpItems.value = hierarchy
     loadingClickup.value = false;
   }).catch(() => {
@@ -166,6 +169,8 @@ async function refreshClickUpHierarchy() {
   // Keep previous hierarchy visible while loading new data
   loadingClickup.value = true;
   new Promise((resolve, reject) => {
+    ipcRenderer.removeAllListeners("set-clickup-hierarchy");
+    ipcRenderer.removeAllListeners("fetch-clickup-hierarchy-error");
     ipcRenderer.send("refresh-clickup-hierarchy");
     console.info("Refreshing Clickup hierarchy in background (previous data remains accessible)...");
     ipcRenderer.once("set-clickup-hierarchy", (event, hierarchy) => {
@@ -183,6 +188,7 @@ async function refreshClickUpHierarchy() {
 
   }).then((hierarchy) => {
     // Only update hierarchy after new data is loaded (keeps old data visible during load)
+    buildAncestorIds(hierarchy)
     clickUpItems.value = hierarchy
     onSuccess({
       title: "Clickup hierarchy refreshed",
@@ -323,8 +329,51 @@ function renderSwitcherIcon(option) {
   return h(NIcon, {size: '15px', id: 'cascader-icon', color: color}, {default: () => h(icon)})
 }
 
+function buildAncestorIds(items, ancestorIds = []) {
+  for (const item of items) {
+    const childAncestorIds = [...ancestorIds, item.id]
+    if (item.type === 'task' || item.type === 'subtask') {
+      item.ancestorIds = ancestorIds
+    }
+    if (item.children && item.children.length > 0) {
+      buildAncestorIds(item.children, childAncestorIds)
+    }
+  }
+}
+
+// Cached per-query shortcut lookup — computed once per query string, not per option
+let _lastQuery = null;
+let _lastShortcut = null;
+
+function resolveShortcut(q) {
+  if (q === _lastQuery) return _lastShortcut;
+  const shortcuts = store.get('settings.search_shortcuts') || [];
+  const firstWord = q.split(/\s+/)[0];
+  _lastShortcut = shortcuts.find(sc => normalize(sc.keyword || '') === firstWord) || null;
+  _lastQuery = q;
+  return _lastShortcut;
+}
+
 function filter(query, option) {
   const q = normalize(query);
+
+  // Check if query starts with a configured shortcut keyword
+  if (option && option.ancestorIds !== undefined) {
+    const matchedShortcut = resolveShortcut(q);
+
+    if (matchedShortcut) {
+      const ids = matchedShortcut.selectedKeys || [];
+      if (ids.length > 0 && !ids.some(id => option.ancestorIds.includes(id))) return false;
+      const remainingQuery = q.split(/\s+/).slice(1).join(' ').trim();
+      if (!remainingQuery) return true;
+      return originalFilter(remainingQuery, option);
+    }
+  }
+
+  return originalFilter(q, option);
+}
+
+function originalFilter(q, option) {
   const fields = [];
   // Primary label/name
   if (option && option.label) fields.push(option.label);
@@ -334,7 +383,6 @@ function filter(query, option) {
   // Numeric/internal id
   if (option && option.id) fields.push(String(option.id));
   if (option && option.value) fields.push(String(option.value));
-
   return fields.some(v => normalize(v).includes(q));
 }
 
@@ -342,6 +390,36 @@ function normalize(v) {
   if (v === null || v === undefined) return '';
   const s = String(v);
   return removeAccents(s.toLowerCase()).trim();
+}
+
+// Auto-select on Enter when exactly one task matches the current search query
+const treeSelectRef = ref(null);
+
+function getMatchingTasks(query) {
+  const results = [];
+  const collect = (nodes) => {
+    for (const node of nodes) {
+      if (node.type === 'task' || node.type === 'subtask') {
+        if (filter(query, node)) results.push(node);
+      }
+      if (node.children) collect(node.children);
+    }
+  };
+  collect(options.value);
+  return results;
+}
+
+function onSearchKeydown(e) {
+  if (e.key !== 'Enter' || e.target.tagName !== 'INPUT') return;
+  const query = e.target.value;
+  if (!query) return;
+  const matches = getMatchingTasks(query);
+  if (matches.length === 1) {
+    formValue.value.task.taskId = matches[0].value;
+    treeSelectRef.value?.blur();
+    e.preventDefault();
+    e.stopPropagation();
+  }
 }
 
 /*
@@ -378,7 +456,9 @@ onMounted(async () => {
     <div class="flex space-x-2 mb-4">
       <n-form-item path="taskId" class="flex-grow" :show-label="false">
         <n-config-provider class="flex-grow" :theme-overrides="customTheme">
+          <div @keydown.capture="onSearchKeydown" class="flex-grow">
           <n-tree-select
+              ref="treeSelectRef"
               v-model:value="formValue.task.taskId"
               :options="options"
               :disabled="loadingClickup && clickUpItems.length === 0"
@@ -422,6 +502,7 @@ onMounted(async () => {
               </div>
             </template>
           </n-tree-select>
+          </div>
         </n-config-provider>
       </n-form-item>
 

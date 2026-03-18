@@ -86,7 +86,7 @@
           </span>
 
           <!-- START | Task context popover -->
-          <n-popover :delay="500" :duration="60" trigger="hover" width="260">
+          <n-popover v-if="event.entryId" :delay="500" :duration="60" trigger="hover" width="260">
             <template #trigger>
               <div class="vuecal__event-task-info-popover absolute top-0 right-0 py-0.5 px-1 cursor-pointer flex">
                 <information-circle-icon class="w-5 transition-all hover:scale-125 dark:text-gray-400" />
@@ -148,11 +148,11 @@
         </div>
 
         <!-- START | Time from/to -->
-        <div v-if="store.get('settings.show_start_end_time') !== false || store.get('settings.show_duration') !== false"
+        <div v-if="showStartEndTime || showDuration"
           class="vuecal__event-time flex justify-between dark:text-gray-400"
           :class="{ 'opacity-50': deletingEntryIds.includes(event.entryId) }">
-          <span v-if="store.get('settings.show_start_end_time') !== false">{{ event.start.formatTime('HH:mm') }}<span class="opacity-40">…</span>{{ event.end.formatTime('HH:mm') }}</span>
-          <span v-if="store.get('settings.show_duration') !== false">{{ formatDuration(event.end - event.start) }}</span>
+          <span v-if="showStartEndTime">{{ event.start.formatTime('HH:mm') }}<span class="opacity-40">…</span>{{ event.end.formatTime('HH:mm') }}</span>
+          <span v-if="showDuration">{{ formatDuration(event.end - event.start) }}</span>
         </div>
         <!-- END | Time from/to -->
       </template>
@@ -390,6 +390,14 @@ export default {
       if (!store.get('settings.day_end')) return 22 * 60
       if (store.get('settings.day_end') > 24) return 22 * 60
       return store.get('settings.day_end') * 60;
+    },
+
+    showStartEndTime() {
+      return store.get('settings.show_start_end_time') !== false;
+    },
+
+    showDuration() {
+      return store.get('settings.show_duration') !== false;
     },
   },
 

@@ -5,6 +5,44 @@ import {ClickUpItemFactory} from "@/model/ClickUpModels";
 
 const BASE_URL = 'https://api.clickup.com/api/v2';
 
+// Concurrency limiter — caps parallel ClickUp API requests to avoid hitting rate limits
+const MAX_CONCURRENT = 8;
+let _activeRequests = 0;
+const _requestQueue = [];
+
+function _acquireSlot() {
+    return new Promise(resolve => {
+        if (_activeRequests < MAX_CONCURRENT) { _activeRequests++; resolve(); }
+        else _requestQueue.push(resolve);
+    });
+}
+
+function _releaseSlot() {
+    _activeRequests--;
+    if (_requestQueue.length > 0) { _activeRequests++; _requestQueue.shift()(); }
+}
+
+async function throttledRequest(options) {
+    await _acquireSlot();
+    try {
+        const response = await new Promise((resolve, reject) => {
+            request(options, (error, response) => {
+                if (error) reject(error);
+                else resolve(response);
+            });
+        });
+        if (response.statusCode === 429) {
+            const retryAfter = parseInt(response.headers['retry-after'] || '5', 10);
+            console.warn(`ClickUp rate limit hit, retrying in ${retryAfter}s`);
+            await new Promise(r => setTimeout(r, retryAfter * 1000));
+            return throttledRequest(options);
+        }
+        return response;
+    } finally {
+        _releaseSlot();
+    }
+}
+
 // Cache keys
 export const HIERARCHY_CACHE_KEY = 'hierarchy';
 export const HIERARCHY_METADATA_CACHE_KEY = 'hierarchy_metadata';
@@ -450,28 +488,17 @@ export default {
      */
     async getSpaces() {
         this.requests++;
-        return new Promise((resolve, reject) => {
-            request({
-                method: 'GET',
-                mode: 'no-cors',
-                url: `${BASE_URL}/team/${store.get('settings.clickup_team_id')}/space?archived=false'`,
-
-                headers: {
-                    'Authorization': store.get('settings.clickup_access_token'),
-                    'Content-Type': 'application/json'
-                }
-            }, (error, response) => {
-                if (error) return reject(error)
-                resolve(JSON.parse(response.body).spaces || [])
-            });
-        }).then(spaces => {
-            spaces = spaces.map(space => factory.createSpace(space))
-            // console.log("Spaces received from ClickUp: ")
-            // console.log(spaces)
-            return spaces
-        }).catch(e => {
-            console.error(e)
-        })
+        const response = await throttledRequest({
+            method: 'GET',
+            mode: 'no-cors',
+            url: `${BASE_URL}/team/${store.get('settings.clickup_team_id')}/space?archived=false'`,
+            headers: {
+                'Authorization': store.get('settings.clickup_access_token'),
+                'Content-Type': 'application/json'
+            }
+        });
+        const spaces = JSON.parse(response.body).spaces || [];
+        return spaces.map(space => factory.createSpace(space));
     },
 
     async getFolder(folderId) {
@@ -502,26 +529,16 @@ export default {
     */
     async getFolders(spaceId) {
         this.requests++;
-        return new Promise((resolve, reject) => {
-            request({
-                method: 'GET',
-                url: `${BASE_URL}/space/${spaceId}/folder?archived=false`,
-                headers: {
-                    'Authorization': store.get('settings.clickup_access_token'),
-                    'Content-Type': 'application/json'
-                }
-            }, (error, response) => {
-                if (error) return reject(error)
-                resolve(JSON.parse(response.body).folders || [])
-            });
-        }).then(folders => {
-            folders = folders.map(folder => factory.createFolder(folder))
-            // console.log("Folders received from ClickUp")
-            // console.log(folders)
-            return folders
-        }).catch(e => {
-            console.error(e)
-        })
+        const response = await throttledRequest({
+            method: 'GET',
+            url: `${BASE_URL}/space/${spaceId}/folder?archived=false`,
+            headers: {
+                'Authorization': store.get('settings.clickup_access_token'),
+                'Content-Type': 'application/json'
+            }
+        });
+        const folders = JSON.parse(response.body).folders || [];
+        return folders.map(folder => factory.createFolder(folder));
     },
 
     /*
@@ -529,24 +546,16 @@ export default {
     */
     async getFolderedLists(FolderId) {
         this.requests++;
-        return new Promise((resolve, reject) => {
-            request({
-                method: 'GET',
-                url: `${BASE_URL}/folder/${FolderId}/list?archived=false`,
-                headers: {
-                    'Authorization': store.get('settings.clickup_access_token'),
-                    'Content-Type': 'application/json'
-                }
-            }, (error, response) => {
-                if (error) return reject(error)
-                resolve(JSON.parse(response.body).lists || [])
-            });
-        }).then(lists => {
-            lists = lists.map(list => factory.createList(list))
-            return lists
-        }).catch(e => {
-            console.error(e)
-        })
+        const response = await throttledRequest({
+            method: 'GET',
+            url: `${BASE_URL}/folder/${FolderId}/list?archived=false`,
+            headers: {
+                'Authorization': store.get('settings.clickup_access_token'),
+                'Content-Type': 'application/json'
+            }
+        });
+        const lists = JSON.parse(response.body).lists || [];
+        return lists.map(list => factory.createList(list));
     },
 
     async getList(listId) {
@@ -571,26 +580,17 @@ export default {
     },
     async getLists(spaceId) {
         this.requests++;
-        return new Promise((resolve, reject) => {
-            request({
-                method: 'GET',
-                mode: 'no-cors',
-                url: `${BASE_URL}/space/${spaceId}/list?archived=false`,
-
-                headers: {
-                    'Authorization': store.get('settings.clickup_access_token'),
-                    'Content-Type': 'application/json'
-                }
-            }, (error, response) => {
-                if (error) return reject(error)
-                resolve(JSON.parse(response.body).lists || [])
-            });
-        }).then(lists => {
-            lists = lists.map(list => factory.createList(list))
-            return lists
-        }).catch(e => {
-            console.error(e)
-        })
+        const response = await throttledRequest({
+            method: 'GET',
+            mode: 'no-cors',
+            url: `${BASE_URL}/space/${spaceId}/list?archived=false`,
+            headers: {
+                'Authorization': store.get('settings.clickup_access_token'),
+                'Content-Type': 'application/json'
+            }
+        });
+        const lists = JSON.parse(response.body).lists || [];
+        return lists.map(list => factory.createList(list));
     },
 
     _assignSubtasksToParentTasks(results) {
@@ -648,26 +648,22 @@ export default {
             this.requests++;
 
             try {
-                const results = await new Promise((resolve, reject) => {
-                    request({
-                        method: 'GET',
-                        url: `${BASE_URL}/list/${listId}/task`,
-                        qs: {
-                            archived: false,
-                            include_markdown_description: false,
-                            subtasks: true,
-                            include_closed: true,
-                            page: page
-                        },
-                        headers: {
-                            'Authorization': store.get('settings.clickup_access_token'),
-                            'Content-Type': 'application/json'
-                        }
-                    }, (error, response) => {
-                        if (error) return reject(error);
-                        resolve(JSON.parse(response.body).tasks || []);
-                    });
+                const response = await throttledRequest({
+                    method: 'GET',
+                    url: `${BASE_URL}/list/${listId}/task`,
+                    qs: {
+                        archived: false,
+                        include_markdown_description: false,
+                        subtasks: true,
+                        include_closed: true,
+                        page: page
+                    },
+                    headers: {
+                        'Authorization': store.get('settings.clickup_access_token'),
+                        'Content-Type': 'application/json'
+                    }
                 });
+                const results = JSON.parse(response.body).tasks || [];
 
                 tasks.push(...results);
                 hasMore = results.length === CLICKUP_TASKS_PER_PAGE; // Continue if the page is full
