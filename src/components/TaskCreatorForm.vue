@@ -15,7 +15,7 @@ import {ArrowPathIcon, ArrowTurnDownRightIcon} from "@heroicons/vue/20/solid";
 import {DocumentCheckIcon} from "@heroicons/vue/24/outline";
 import {Folder, List, Planet} from '@vicons/ionicons5'
 import {CircleFilled} from "@vicons/carbon";
-import {computed, defineEmits, h, onMounted, ref} from "vue";
+import {computed, defineEmits, h, nextTick, onMounted, ref} from "vue";
 import {ipcRenderer} from 'electron';
 import clickupService from "@/clickup-service";
 import store from "@/store";
@@ -392,8 +392,9 @@ function normalize(v) {
   return removeAccents(s.toLowerCase()).trim();
 }
 
-// Auto-select on Enter when exactly one task matches the current search query
+// Auto-highlight first matching task in dropdown as the user types
 const treeSelectRef = ref(null);
+const _navKeys = new Set(['ArrowDown', 'ArrowUp', 'Enter', 'Escape', 'Tab', 'Shift', 'Control', 'Alt', 'Meta']);
 
 function getMatchingTasks(query) {
   const results = [];
@@ -409,17 +410,17 @@ function getMatchingTasks(query) {
   return results;
 }
 
-function onSearchKeydown(e) {
-  if (e.key !== 'Enter' || e.target.tagName !== 'INPUT') return;
+function onSearchKeyup(e) {
+  if (e.target.tagName !== 'INPUT' || _navKeys.has(e.key)) return;
   const query = e.target.value;
-  if (!query) return;
-  const matches = getMatchingTasks(query);
-  if (matches.length === 1) {
-    formValue.value.task.taskId = matches[0].value;
-    treeSelectRef.value?.blur();
-    e.preventDefault();
-    e.stopPropagation();
-  }
+  if (!query || !treeSelectRef.value) return;
+  // Wait for Naive UI to re-filter the tree, then set pending to first match
+  nextTick(() => {
+    const matches = getMatchingTasks(query);
+    if (matches.length > 0) {
+      treeSelectRef.value.pendingNodeKey = matches[0].value;
+    }
+  });
 }
 
 /*
@@ -456,7 +457,7 @@ onMounted(async () => {
     <div class="flex space-x-2 mb-4">
       <n-form-item path="taskId" class="flex-grow" :show-label="false">
         <n-config-provider class="flex-grow" :theme-overrides="customTheme">
-          <div @keydown.capture="onSearchKeydown" class="flex-grow">
+          <div @keyup.capture="onSearchKeyup" class="flex-grow">
           <n-tree-select
               ref="treeSelectRef"
               v-model:value="formValue.task.taskId"
@@ -565,3 +566,4 @@ onMounted(async () => {
 <style scoped>
 
 </style>
+
