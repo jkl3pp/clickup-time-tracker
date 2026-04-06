@@ -728,17 +728,14 @@ export default {
             const params = {
                 start_date: start.getTime(),
                 end_date: end.getTime(),
-                space_id: space_id,
-                folder_id: folder_id,
-                list_id: list_id,
-                task_id: task_id,
                 include_location_names: true,
             }
 
-            // Only set assignee when argument was given
-            if (userId) {
-                params.assignee = userId
-            }
+            if (space_id) params.space_id = space_id;
+            if (folder_id) params.folder_id = folder_id;
+            if (list_id) params.list_id = list_id;
+            if (task_id) params.task_id = task_id;
+            if (userId) params.assignee = userId;
 
             const url = `${teamRootUrl()}/time_entries?` + new URLSearchParams(params);
 

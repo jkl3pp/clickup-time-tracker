@@ -159,6 +159,20 @@
         </n-form-item>
         <hr class="my-6 dark:border-gray-700" />
         <!-- END | Search Shortcuts -->
+
+        <!-- START | Theme -->
+        <label class="absolute px-1.5 bg-white dark:bg-gray-800 -ml-4 -mt-9">Theme</label>
+
+        <n-form-item :show-feedback="false" :show-label="false" path="theme_mode">
+          <n-radio-group v-model:value="model.theme_mode" name="theme_mode">
+            <n-radio-button value="light">Light</n-radio-button>
+            <n-radio-button value="dark">Dark</n-radio-button>
+            <n-radio-button value="system">System</n-radio-button>
+          </n-radio-group>
+        </n-form-item>
+
+        <hr class="my-6 dark:border-gray-700" />
+        <!-- END | Theme -->
         <!-- END | Feature toggles -->
 
         <!-- START | Styling -->
@@ -310,7 +324,9 @@ import {
   NDynamicInput,
   NInputNumber,
   NIcon,
-  NTreeSelect
+  NTreeSelect,
+  NRadioGroup,
+  NRadioButton,
 } from "naive-ui";
 import { BackspaceIcon, ClockIcon, ArrowPathIcon } from "@heroicons/vue/24/outline";
 import { ipcRenderer } from 'electron';
@@ -338,6 +354,8 @@ export default {
     NDynamicInput,
     NInputNumber,
     NTreeSelect,
+    NRadioGroup,
+    NRadioButton,
   },
 
   setup() {
@@ -347,6 +365,10 @@ export default {
     const model = ref(store.get("settings") || {});
     const hours = ref(Array.from(Array(25).keys()).map((i) => ({ label: `${i}:00`, value: i })));
     let custom_color = ref(false);
+
+    if (!model.value.theme_mode) {
+      model.value.theme_mode = 'system';
+    }
 
     // Initialize hierarchy_filter if not exists
     if (!model.value.hierarchy_filter) {

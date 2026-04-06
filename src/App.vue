@@ -14,7 +14,8 @@ import { NConfigProvider, NNotificationProvider, darkTheme, useOsTheme } from "n
 import OnlineStatusProvider from "@/components/OnlineStatusProvider";
 import SplashScreen from "@/components/SplashScreen";
 import "@/assets/tailwind.css";
-import {computed, ref} from "vue";
+import {computed, ref, watch} from "vue";
+import store from "@/store";
 
 /**
  * Theme Overrides for both light and dark themes
@@ -49,26 +50,31 @@ export default {
     SplashScreen,
   },
   setup() {
-    // Detect system theme
     const osTheme = useOsTheme();
-    console.log("OS Theme: ", osTheme);
-    const isDark = ref(osTheme.value === "dark");
+    const themePreference = ref(store.get('settings.theme_mode', 'system'));
 
-    // Reactive theme handling
+    const isDark = computed(() => {
+      if (themePreference.value === 'dark') return true;
+      if (themePreference.value === 'light') return false;
+      return osTheme.value === 'dark';
+    });
+
+    // Keep the 'dark' class on <html> in sync
+    const applyDarkClass = (dark) => {
+      document.documentElement.classList.toggle('dark', dark);
+    };
+    applyDarkClass(isDark.value);
+    watch(isDark, applyDarkClass);
+
+    // Poll for settings changes (from UserSettings save)
+    setInterval(() => {
+      themePreference.value = store.get('settings.theme_mode', 'system');
+    }, 500);
+
     const currentTheme = computed(() => (isDark.value ? darkTheme : null));
     const currentThemeOverrides = computed(() =>
         isDark.value ? darkThemeOverrides : lightThemeOverrides
     );
-
-    // Watch system theme changes
-    const updateTheme = (theme) => {
-      isDark.value = theme === "dark";
-    };
-    window
-        .matchMedia("(prefers-color-scheme: dark)")
-        .addEventListener("change", (e) => {
-          updateTheme(e.matches ? "dark" : "light");
-        });
 
     return {
       currentTheme,
@@ -108,12 +114,10 @@ export default {
   background-color: var(--n-color);
 }
 
-@media (prefers-color-scheme: dark) {
-  body {
-    background: rgb(17, 24, 39);
-    color: var(--n-text-color);
-    min-height: 100vh;
-  }
+html.dark body {
+  background: rgb(17, 24, 39);
+  color: var(--n-text-color);
+  min-height: 100vh;
 }
 
 </style>

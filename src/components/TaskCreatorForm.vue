@@ -335,6 +335,10 @@ function buildAncestorIds(items, ancestorIds = []) {
     if (item.type === 'task' || item.type === 'subtask') {
       item.ancestorIds = ancestorIds
     }
+    // Pre-compute normalized search fields to avoid per-keystroke removeAccents() calls
+    item._searchFields = [item.label, item.name, item.custom_id, item.id, item.value]
+        .filter(Boolean)
+        .map(v => normalize(String(v)))
     if (item.children && item.children.length > 0) {
       buildAncestorIds(item.children, childAncestorIds)
     }
@@ -374,13 +378,14 @@ function filter(query, option) {
 }
 
 function originalFilter(q, option) {
+  if (option && option._searchFields) {
+    return option._searchFields.some(f => f.includes(q));
+  }
+  // Fallback for nodes without pre-computed fields
   const fields = [];
-  // Primary label/name
   if (option && option.label) fields.push(option.label);
   if (option && option.name) fields.push(option.name);
-  // ClickUp custom task ID like QM-793
   if (option && option.custom_id) fields.push(String(option.custom_id));
-  // Numeric/internal id
   if (option && option.id) fields.push(String(option.id));
   if (option && option.value) fields.push(String(option.value));
   return fields.some(v => normalize(v).includes(q));
@@ -396,31 +401,38 @@ function normalize(v) {
 const treeSelectRef = ref(null);
 const _navKeys = new Set(['ArrowDown', 'ArrowUp', 'Enter', 'Escape', 'Tab', 'Shift', 'Control', 'Alt', 'Meta']);
 
-function getMatchingTasks(query) {
-  const results = [];
-  const collect = (nodes) => {
+function getFirstMatchingTask(query) {
+  const find = (nodes) => {
     for (const node of nodes) {
-      if (node.type === 'task' || node.type === 'subtask') {
-        if (filter(query, node)) results.push(node);
+      if ((node.type === 'task' || node.type === 'subtask') && filter(query, node)) {
+        return node;
       }
-      if (node.children) collect(node.children);
+      if (node.children) {
+        const found = find(node.children);
+        if (found) return found;
+      }
     }
+    return null;
   };
-  collect(options.value);
-  return results;
+  return find(options.value);
 }
+
+let _highlightTimer = null;
 
 function onSearchKeyup(e) {
   if (e.target.tagName !== 'INPUT' || _navKeys.has(e.key)) return;
   const query = e.target.value;
   if (!query || !treeSelectRef.value) return;
-  // Wait for Naive UI to re-filter the tree, then set pending to first match
-  nextTick(() => {
-    const matches = getMatchingTasks(query);
-    if (matches.length > 0) {
-      treeSelectRef.value.pendingNodeKey = matches[0].value;
-    }
-  });
+
+  if (_highlightTimer) clearTimeout(_highlightTimer);
+  _highlightTimer = setTimeout(() => {
+    nextTick(() => {
+      const match = getFirstMatchingTask(query);
+      if (match) {
+        treeSelectRef.value.pendingNodeKey = match.value;
+      }
+    });
+  }, 150);
 }
 
 /*

@@ -166,7 +166,7 @@
   }
 }
 
-@media (prefers-color-scheme: dark) {
+html.dark {
   .vuecal__cell--today, .vuecal__cell--current {
     background-color: rgba(white, .06);
   }
