@@ -926,7 +926,7 @@ onMounted(async () => {
 
     <!-- Description textbox -->
     <div class="flex space-x-2 mb-5">
-      <n-form-item path="description" class="flex-grow" :show-label="false" :show-feedback="false">
+      <n-form-item path="description" class="flex-grow" :show-label="false">
         <n-mention
             ref="descriptionRef"
             v-model:value="formValue.task.description"
