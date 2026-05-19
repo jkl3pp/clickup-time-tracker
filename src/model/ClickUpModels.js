@@ -80,11 +80,11 @@ export class ClickUpItem{
                 break;
             case ClickUpType.TASK:
                 this.disable = false;
-                this.date_closed = item.date_closed;
+                this.date_closed = item.date_closed != null ? item.date_closed : null;
                 break;
             case ClickUpType.SUBTASK:
                 this.disable = false;
-                this.date_closed = item.date_closed;
+                this.date_closed = item.date_closed != null ? item.date_closed : null;
                 break;
         }
 

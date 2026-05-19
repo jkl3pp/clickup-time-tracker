@@ -11,7 +11,8 @@ init({
 import { app, protocol, ipcMain, BrowserWindow } from 'electron'
 import { createProtocol } from 'vue-cli-plugin-electron-builder/lib'
 import installExtension, { VUEJS3_DEVTOOLS } from 'electron-devtools-installer'
-import clickupService, {HIERARCHY_CACHE_KEY} from '@/clickup-service'
+import clickupService, {HIERARCHY_CACHE_KEY, STORE_KEY_USER_ID} from '@/clickup-service'
+import store from '@/store'
 import cache from '@/cache'
 import { createMenu } from '@/app-menu'
 import updater from '@/app-updater'
@@ -135,7 +136,19 @@ app.on('ready', async () => {
     // Pre-load hierarchy in the background on app start
     // This ensures the cache is warm and fresh data is fetched silently
     preloadHierarchy()
+    migrateUserId()
 })
+
+function migrateUserId() {
+    const hasToken = store.get('settings.clickup_access_token');
+    const hasUserId = store.get(STORE_KEY_USER_ID);
+    if (hasToken && !hasUserId) {
+        console.log('Migrating: fetching user ID from ClickUp...')
+        clickupService.getCurrentUserId()
+            .then(id => console.log(`Migrated user ID: ${id}`))
+            .catch(err => console.error('Failed to migrate user ID:', err))
+    }
+}
 
 // Pre-load ClickUp hierarchy in the background
 // Cached data is available immediately, fresh data loads silently in background

@@ -1,6 +1,6 @@
 {
   "private": true,
-  "version": "1.3.2-kr.4",
+  "version": "1.3.8-kr.1",
   "name": "clickup-time-tracker",
   "productName": "ClickUp Time Tracker",
   "description": "A tool for painlessly tracking time on ClickUp tasks",
@@ -15,6 +15,8 @@
   },
   "scripts": {
     "lint": "vue-cli-service lint",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "build:all": "npm run build:osx && npm run build:win && npm run build:linux",
     "build:linux": "npm run electron:build -p never -- --linux",
     "build:osx": "PYTHON=python3 npm run electron:build -p never -- --mac=dmg",
@@ -64,6 +66,7 @@
     "postcss": "^8.4.19",
     "sass-loader": "^13.2",
     "tailwindcss": "^3.2.4",
+    "vitest": "^0.34.6",
     "vue-cli-plugin-electron-builder": "~2.1.1"
   },
   "overrides": {

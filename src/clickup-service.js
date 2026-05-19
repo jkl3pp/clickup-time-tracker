@@ -48,6 +48,9 @@ export const HIERARCHY_CACHE_KEY = 'hierarchy';
 export const HIERARCHY_METADATA_CACHE_KEY = 'hierarchy_metadata';
 const USERS_CACHE_KEY = 'users';
 
+// Store keys
+export const STORE_KEY_USER_ID = 'settings.clickup_user_id';
+
 // Timeout and pagination constants
 const DEFAULT_CLICKUP_TIMEOUT = 30000; // 30 seconds
 const CLICKUP_TASKS_PER_PAGE = 100; // ClickUp API pagination limit
@@ -89,7 +92,32 @@ export default {
 
                 if (!user) reject('Invalid response')
 
+                store.set(STORE_KEY_USER_ID, user.id)
+
                 resolve(true)
+            });
+        })
+    },
+
+    async getCurrentUserId() {
+        const stored = store.get(STORE_KEY_USER_ID);
+        if (stored) return stored;
+
+        return new Promise((resolve, reject) => {
+            request({
+                method: 'GET',
+                url: `${BASE_URL}/user`,
+                headers: {
+                    'Authorization': store.get('settings.clickup_access_token'),
+                    'Content-Type': 'application/json'
+                },
+                timeout: DEFAULT_CLICKUP_TIMEOUT,
+            }, (error, response) => {
+                if (error) return reject(error)
+                const user = JSON.parse(response.body).user
+                if (!user) return reject('Invalid response')
+                store.set(STORE_KEY_USER_ID, user.id)
+                resolve(user.id)
             });
         })
     },
@@ -679,26 +707,133 @@ export default {
     },
 
     async getTask(taskId, raw = false) {
+        return this._fetchTaskById(taskId, {raw, useCustomId: false});
+    },
+
+    async getTaskByCustomId(customId, raw = false) {
+        return this._fetchTaskById(customId, {raw, useCustomId: true});
+    },
+
+    async _fetchTaskById(taskId, {raw = false, useCustomId = false} = {}) {
+        const qs = {
+            include_subtasks: true,
+            include_markdown_description: false,
+        };
+        if (useCustomId) {
+            qs.custom_task_ids = true;
+            qs.team_id = store.get('settings.clickup_team_id');
+        }
+
         return new Promise((resolve, reject) => {
             request({
                 method: 'GET',
                 mode: 'no-cors',
-                url: `${BASE_URL}/task/${taskId}?include_subtasks=true&include_markdown_description=false`,
+                url: `${BASE_URL}/task/${taskId}`,
+                qs,
                 headers: {
                     'Authorization': store.get('settings.clickup_access_token'),
                     'Content-Type': 'application/json'
                 }
             }, (error, response) => {
-                if (error) return reject(error)
-                resolve(JSON.parse(response.body) || [])
+                if (error) return reject(error);
+                const body = JSON.parse(response.body) || {};
+                // ClickUp returns {err, ECODE} when not found. Treat as null instead of rejecting.
+                if (body.err) return resolve(null);
+                resolve(body);
             });
         }).then(task => {
+            if (!task) return null;
             if (!raw) {
-                task = factory.createTask(task)
+                task = factory.createTask(task);
             }
-            return task
+            return task;
         }).catch(e => {
-            console.error(e)
+            console.error(e);
+            return null;
+        });
+    },
+
+    /*
+     * Fetch the most recently updated team tasks (first page only).
+     * Used as a fallback search source when a query yields zero local matches.
+     */
+    async getRecentTeamTasks(limit = 50) {
+        return new Promise((resolve, reject) => {
+            request({
+                method: 'GET',
+                url: `${teamRootUrl()}/task`,
+                qs: {
+                    page: 0,
+                    order_by: 'updated',
+                    include_closed: true,
+                    subtasks: true,
+                },
+                headers: {
+                    'Authorization': store.get('settings.clickup_access_token'),
+                    'Content-Type': 'application/json'
+                },
+                timeout: DEFAULT_CLICKUP_TIMEOUT,
+            }, (error, response) => {
+                if (error) return reject(error);
+                const body = JSON.parse(response.body) || {};
+                const tasks = body.tasks || [];
+                resolve(tasks.slice(0, limit));
+            });
+        }).catch(e => {
+            console.error('getRecentTeamTasks failed:', e);
+            return [];
+        });
+    },
+
+    async getListStatuses(listId) {
+        return new Promise((resolve, reject) => {
+            request({
+                method: 'GET',
+                url: `${BASE_URL}/list/${listId}`,
+                headers: {
+                    'Authorization': store.get('settings.clickup_access_token'),
+                    'Content-Type': 'application/json'
+                },
+                timeout: DEFAULT_CLICKUP_TIMEOUT,
+            }, (error, response) => {
+                if (error) return reject(error)
+                const list = JSON.parse(response.body)
+                resolve(list.statuses || [])
+            });
+        })
+    },
+
+    createClickUpTask(listId, name, assignees = [], status = null) {
+        const startTime = performance.now();
+        const url = `${BASE_URL}/list/${listId}/task`;
+
+        return new Promise((resolve, reject) => {
+            request({
+                method: 'POST',
+                url: url,
+                headers: {
+                    'Authorization': store.get('settings.clickup_access_token'),
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    name,
+                    assignees,
+                    ...(status && {status}),
+                }),
+                timeout: DEFAULT_CLICKUP_TIMEOUT,
+            }, (error, response) => {
+                const elapsed = (performance.now() - startTime).toFixed(2);
+                console.log(`[API TIMING] POST ${url} - ${elapsed}ms`);
+
+                if (error) return reject(error)
+                const body = JSON.parse(response.body)
+
+                if (body.err) {
+                    return reject(body.err)
+                }
+
+                resolve(body)
+            })
         })
     },
 
