@@ -107,8 +107,8 @@
                     class="block text-xs text-gray-500 dark:text-gray-400 font-normal">{{ event.taskLocationShort
                     }}</span>
                 </span>
-                <n-popconfirm v-if="selectedTask.deletable" :negative-text="null" :show-icon="false"
-                  positive-text="delete" @positive-click="deleteSelectedTask">
+                <n-popconfirm v-if="event.deletable" :negative-text="null" :show-icon="false"
+                  positive-text="delete" @positive-click="() => deleteSelectedTask(event)">
                   <template #trigger>
                     <n-button circle secondary type="error">
                       <n-icon name="delete-tracking-entry" size="18">
@@ -547,10 +547,15 @@ export default {
     |--------------------------------------------------------------------------
     */
 
-    async deleteSelectedTask() {
-      if (isEmptyObject(this.selectedTask)) return;
+    async deleteSelectedTask(targetEvent) {
+      const target = targetEvent || this.selectedTask;
+      if (isEmptyObject(target)) return;
 
-      const entryId = this.selectedTask.entryId;
+      const entryId = target.entryId;
+      // entryId can be undefined when a freshly drag-created entry hasn't
+      // returned from ClickUp yet — hover popover would otherwise DELETE /time_entries/undefined
+      if (!entryId) return;
+
       this.loadingEvents = true;
       this.deletingEntryIds.push(entryId);
 
@@ -561,9 +566,9 @@ export default {
             (event) => event.entryId === entryId
           );
 
-          this.events.splice(taskIndex, 1);
+          if (taskIndex > -1) this.events.splice(taskIndex, 1);
           this.showTaskDetailsModal = false;
-          this.selectedTask = {};
+          if (this.selectedTask.entryId === entryId) this.selectedTask = {};
         })
         .catch(error => this.error({
           error,
