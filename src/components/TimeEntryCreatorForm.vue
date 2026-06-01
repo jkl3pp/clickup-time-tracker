@@ -781,9 +781,9 @@ onMounted(async () => {
         What are you working on?
       </n-h1>
       <p class="text-xs text-gray-400 dark:text-gray-500 ml-8">
-        {{ props.start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}
+        {{ props.start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) }}
         &ndash;
-        {{ props.end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}
+        {{ props.end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) }}
       </p>
     </div>
 
