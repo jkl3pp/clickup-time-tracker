@@ -33,8 +33,12 @@ function searchableHaystack(task) {
     return normalize(`${task.name || ''} ${task.custom_id || ''} ${task.id || ''}`);
 }
 
+// Fuzzy matching is for correcting typos in human-readable names. IDs (custom_id,
+// native id) are excluded on purpose: they share prefixes and differ only by digits
+// (ROSS-4679 vs ROSS-4757), so edit-distance matching collides across hundreds of
+// tasks. IDs stay exact-match only via searchableHaystack.
 function taskWords(task) {
-    return normalize(`${task.name || ''} ${task.custom_id || ''}`)
+    return normalize(task.name || '')
         .split(/\s+/)
         .filter(word => word.length >= 2);
 }

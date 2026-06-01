@@ -735,7 +735,26 @@ const lastSearchPattern = ref('');
 
 watch(searchPattern, (val) => {
   if (val) lastSearchPattern.value = val;
+  autoSelectTaskByExactId(val);
 });
+
+function autoSelectTaskByExactId(pattern) {
+  if (!pattern) return;
+  const normalized = normalize(pattern);
+  if (!normalized) return;
+
+  const flat = flattenTasks(filteredOptions.value);
+  const match = flat.find(task =>
+      normalize(task.id) === normalized || normalize(task.custom_id) === normalized
+  );
+  if (!match) return;
+
+  formValue.value.task.taskId = match.value ?? match.id;
+  treeSelectOpen.value = false;
+  nextTick(() => {
+    descriptionRef.value?.focus();
+  });
+}
 
 watch(treeSelectOpen, (isOpen) => {
   if (!isOpen) return;
