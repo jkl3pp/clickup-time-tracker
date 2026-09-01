@@ -153,6 +153,18 @@ function migrateUserId() {
 // Pre-load ClickUp hierarchy in the background
 // Cached data is available immediately, fresh data loads silently in background
 function preloadHierarchy() {
+    // Without a configured filter this walks every list in the workspace
+    // (~880 requests, ~11 minutes here) before the user has chosen anything,
+    // and saturates the rate limit so the calendar can't load either.
+    // Wait until hierarchy filtering is set up in Settings.
+    const filter = store.get('settings.hierarchy_filter')
+    const hasSelection = filter && filter.selection && filter.selection.spaces
+        && Object.keys(filter.selection.spaces).length > 0
+    if (!filter || !filter.enabled || !hasSelection) {
+        console.log('Skipping hierarchy pre-load: hierarchy filtering is not configured yet')
+        return
+    }
+
     // Small delay to let the app finish initializing
     setTimeout(() => {
         console.log('Pre-loading ClickUp hierarchy in background...')

@@ -370,10 +370,13 @@ export default {
       model.value.theme_mode = 'system';
     }
 
-    // Initialize hierarchy_filter if not exists
+    // Initialize hierarchy_filter if not exists.
+    // New installs start with filtering ON: unfiltered means walking all 694
+    // lists in this workspace (~880 requests) on first run. With no selection
+    // yet, getHierarchy() fetches nothing and the user picks lists first.
     if (!model.value.hierarchy_filter) {
       model.value.hierarchy_filter = {
-        enabled: false,
+        enabled: true,
         version: 1,
         selection: {
           spaces: {}
