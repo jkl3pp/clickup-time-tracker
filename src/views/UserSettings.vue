@@ -457,6 +457,9 @@ export default {
       } catch (error) {
         clearTimeout(loadingTimeout); // Clear timeout on error too
         console.error(error);
+        // Disarm the previously loaded tree: it may be stale or truncated, and
+        // persist() rebuilds the selection from whatever tree is displayed
+        hierarchyLoaded.value = false;
         notification.error({
           title: "Failed to load hierarchy",
           content: "Please check your connection and try again"
@@ -743,8 +746,10 @@ export default {
         form.value
           .validate()
           .then(() => {
-            // Convert selectedHierarchyKeys back to nested structure
-            if (model.value.hierarchy_filter?.enabled && hierarchyLoaded.value) {
+            // Convert selectedHierarchyKeys back to nested structure.
+            // Requires a loaded, non-empty tree — rebuilding from an empty or
+            // failed tree would silently drop the stored selection.
+            if (model.value.hierarchy_filter?.enabled && hierarchyLoaded.value && hierarchyTreeOptions.value.length > 0) {
               model.value.hierarchy_filter.selection = buildSelectionStructure(
                 selectedHierarchyKeys.value,
                 hierarchyTreeOptions.value

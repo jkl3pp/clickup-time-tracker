@@ -1,7 +1,7 @@
 import request from 'request';
 import store from '@/store';
 import cache from '@/cache';
-import {ClickUpItemFactory} from "@/model/ClickUpModels";
+import {ClickUpItemFactory, ClickUpType} from "@/model/ClickUpModels";
 
 const BASE_URL = 'https://api.clickup.com/api/v2';
 
@@ -22,30 +22,66 @@ function _releaseSlot() {
     if (_requestQueue.length > 0) { _activeRequests++; _requestQueue.shift()(); }
 }
 
+function _logTime() {
+    return new Date().toLocaleTimeString('en-GB'); // HH:MM:SS, 24h
+}
+
+// Global rate-limit gate — one shared pause for all requests instead of each
+// 429'd request sleeping (and logging) on its own
+let _rateLimitGate = null; // non-null while a pause is in effect
+let _rateLimitPauses = 0; // how many pauses so far, reported in walk summaries
+let _completedThisWindow = 0; // successful requests since the last pause ended
+let _lastRateLimitHeaders = ''; // e.g. "remaining 57/100", from the most recent response
+
+function _pauseForRateLimit(seconds) {
+    if (_rateLimitGate) return _rateLimitGate; // join the pause already in progress
+    _rateLimitPauses++;
+    console.warn(`[${_logTime()}] ClickUp rate limit hit after ${_completedThisWindow} successful requests this window — pausing all requests for ${seconds}s (last seen x-ratelimit: ${_lastRateLimitHeaders || 'n/a'})`);
+    _rateLimitGate = new Promise(resolve => setTimeout(() => {
+        _rateLimitGate = null;
+        _completedThisWindow = 0;
+        console.log(`[${_logTime()}] Rate-limit pause over — resuming requests`);
+        resolve();
+    }, seconds * 1000));
+    return _rateLimitGate;
+}
+
 async function throttledRequest(options) {
-    await _acquireSlot();
-    try {
-        const response = await new Promise((resolve, reject) => {
-            request(options, (error, response) => {
-                if (error) reject(error);
-                else resolve(response);
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+        if (_rateLimitGate) await _rateLimitGate; // wait out a global pause before taking a slot
+        await _acquireSlot();
+        if (_rateLimitGate) { _releaseSlot(); continue; } // pause began while we waited for a slot
+        let response;
+        try {
+            response = await new Promise((resolve, reject) => {
+                request({ timeout: DEFAULT_CLICKUP_TIMEOUT, ...options }, (error, response) => {
+                    if (error) reject(error);
+                    else resolve(response);
+                });
             });
-        });
-        if (response.statusCode === 429) {
-            const retryAfter = parseInt(response.headers['retry-after'] || '5', 10);
-            console.warn(`ClickUp rate limit hit, retrying in ${retryAfter}s`);
-            await new Promise(r => setTimeout(r, retryAfter * 1000));
-            return throttledRequest(options);
+        } finally {
+            // Release before any 429 wait so the slot isn't held during the pause
+            _releaseSlot();
         }
-        return response;
-    } finally {
-        _releaseSlot();
+        if (response.headers['x-ratelimit-remaining'] !== undefined) {
+            _lastRateLimitHeaders = `remaining ${response.headers['x-ratelimit-remaining']}/${response.headers['x-ratelimit-limit'] || '?'}`;
+        }
+        if (response.statusCode !== 429) {
+            _completedThisWindow++;
+            return response;
+        }
+        await _pauseForRateLimit(parseInt(response.headers['retry-after'] || '5', 10));
     }
 }
 
 // Cache keys
 export const HIERARCHY_CACHE_KEY = 'hierarchy';
 export const HIERARCHY_METADATA_CACHE_KEY = 'hierarchy_metadata';
+// Sync state for the cached task hierarchy. Deliberately stored through the
+// cache (not the plain store) so flushing caches on a settings change drops the
+// tree and its sync state together.
+const HIERARCHY_SYNC_CACHE_KEY = 'hierarchy_sync';
 const USERS_CACHE_KEY = 'users';
 
 // Store keys
@@ -57,6 +93,40 @@ const CLICKUP_TASKS_PER_PAGE = 100; // ClickUp API pagination limit
 
 // Cache duration
 const CACHE_DEFAULT = 24 * 7 * 60 * 60; // 7 days in seconds
+
+// Incremental-refresh tuning
+const DELTA_OVERLAP_MS = 5 * 60 * 1000; // re-ask for slightly older changes to absorb clock skew
+const DELTA_MIN_INTERVAL_MS = 5 * 60 * 1000; // don't ask again this soon after a sync
+const FULL_RESYNC_INTERVAL_MS = CACHE_DEFAULT * 1000; // deltas can't see deletions; rebuild weekly
+
+// One in-flight hierarchy load at a time. The main process preloads on startup
+// while the renderer asks on mount, and both used to run the whole thing twice.
+let _hierarchyInFlight = null;
+
+// Cheap stable digest of the saved selection — a delta is only valid while the
+// scope it was fetched for is unchanged
+function _selectionFingerprint(selection) {
+    const json = JSON.stringify(selection || null);
+    let hash = 5381;
+    for (let i = 0; i < json.length; i++) {
+        hash = ((hash * 33) ^ json.charCodeAt(i)) >>> 0;
+    }
+    return `${json.length}-${hash.toString(36)}`;
+}
+
+// When the cached tree predates any sync state, its cache expiry tells us when
+// it was written, which is a safe delta baseline
+function _cachedHierarchyWrittenAt() {
+    const expiresAt = ((cache.all() || {}).expires_at || {})[HIERARCHY_CACHE_KEY];
+    if (!expiresAt) return null;
+    return Math.round((expiresAt - CACHE_DEFAULT) * 1000);
+}
+
+function _insertSortedByName(parent, node) {
+    if (!parent.children) parent.children = [];
+    parent.children.push(node);
+    parent.children.sort((a, b) => (a.name || '').localeCompare(b.name || '', undefined, {sensitivity: 'base'}));
+}
 
 // Factory
 // The factory is used to create the correct model objects from the API response.
@@ -70,6 +140,8 @@ function teamRootUrl() {
 
 export default {
     requests: 0,
+    failedFetches: 0,
+    _lastDeltaStats: null,
 
 
     /*
@@ -122,21 +194,19 @@ export default {
         })
     },
 
-    // Timeout and retry wrapper function
-    async withTimeoutAndRetry(fn, timeout = 120000, retries = 5, retryDelay = 1000) {
+    // Retry wrapper function. Requests carry their own socket-level timeout
+    // (see throttledRequest), so waiting for a concurrency slot or a rate-limit
+    // backoff never counts as a failure here.
+    async withTimeoutAndRetry(fn, retries = 5, retryDelay = 1000) {
         for (let attempt = 1; attempt <= retries; attempt++) {
             try {
-                return await Promise.race([
-                    fn(),
-                    new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error(`Timeout after ${timeout}ms`)), timeout)
-                    )
-                ]);
+                return await fn();
             } catch (error) {
                 console.error(`Attempt ${attempt} failed: ${error.message}`);
                 if (attempt === retries) {
                     console.error(`Max retries reached for ${fn.name}`);
-                    return []; // Return an empty result after max retries
+                    this.failedFetches++;
+                    throw error; // Never swallow into [] — a partial tree must not be cached
                 }
                 await new Promise(resolve => setTimeout(resolve, retryDelay * attempt)); // Optional delay before retry
             }
@@ -171,24 +241,69 @@ export default {
     },
 
     async getCachedHierarchy() {
+        // Share one load: the main process preloads on startup while the
+        // renderer asks on mount, and running both doubles the request cost
+        // against a shared budget
+        if (_hierarchyInFlight) {
+            // Don't make a caller queue behind a refresh that is already
+            // running — the cached tree is complete as of the last sync, and
+            // the refresh in progress will land in the cache for next time
+            const cached = cache.get(HIERARCHY_CACHE_KEY)
+            if (cached) return cached
+            return _hierarchyInFlight;
+        }
+        _hierarchyInFlight = this._loadCachedHierarchy()
+            .finally(() => { _hierarchyInFlight = null; });
+        return _hierarchyInFlight;
+    },
+
+    async _loadCachedHierarchy() {
         try {
             const cached = cache.get(HIERARCHY_CACHE_KEY)
+            const selection = this._activeSelection()
 
             if (cached) {
-                console.log("Got hierarchy from cache")
-                return cached
+                // Top up the cached tree with what changed since the last sync
+                // instead of rebuilding it
+                if (selection) {
+                    const refreshed = await this._refreshCachedHierarchy(cached, selection)
+                    if (refreshed) return refreshed
+                    console.log("Cached hierarchy can't be refreshed in place, rebuilding")
+                } else {
+                    console.log("Got hierarchy from cache")
+                    return cached
+                }
             }
 
-            let hierarchy = await this.getHierarchy().catch(e => {
-                console.error(e)
-            })
-            return cache.put(
+            // Snapshot rather than reset: an overlapping walk must not be able to
+            // zero this walk's failure count
+            const failedBefore = this.failedFetches
+            const startedAt = Date.now()
+
+            let hierarchy = await this.getHierarchy()
+
+            if (this.failedFetches > failedBefore) {
+                throw new Error(`Hierarchy fetch incomplete: ${this.failedFetches - failedBefore} request(s) failed after retries; not caching partial data`)
+            }
+
+            cache.put(
                 HIERARCHY_CACHE_KEY,
                 hierarchy,
                 CACHE_DEFAULT
             )
+            if (selection) {
+                cache.put(
+                    HIERARCHY_SYNC_CACHE_KEY,
+                    {lastSyncMs: startedAt, fullSyncAtMs: startedAt, selectionFingerprint: _selectionFingerprint(selection)},
+                    CACHE_DEFAULT
+                )
+            } else {
+                cache.clear(HIERARCHY_SYNC_CACHE_KEY)
+            }
+            return hierarchy
         } catch (e) {
             console.error(e)
+            throw e
         }
     },
 
@@ -198,6 +313,7 @@ export default {
     clearCachedHierarchy() {
         cache.clear(HIERARCHY_CACHE_KEY)
         cache.clear(HIERARCHY_METADATA_CACHE_KEY)
+        cache.clear(HIERARCHY_SYNC_CACHE_KEY)
     },
 
     /*
@@ -206,9 +322,8 @@ export default {
      */
     async _getFullHierarchy() {
         console.log("Getting FULL hierarchy from ClickUp");
-        const spaces = await this.getSpaces().catch(e => {
-            console.error(e);
-        });
+        // Not swallowed: without spaces the whole walk is empty, which must never be cached
+        const spaces = await this.withTimeoutAndRetry(() => this.getSpaces());
 
         try {
             console.log(`Got ${spaces.length} spaces from ClickUp (${this.requests} rq)`);
@@ -275,38 +390,128 @@ export default {
     },
 
     /*
-     * Helper: Check if we should process items (either selectAll flag or explicit selection)
+     * Fetch one page of the filtered team-tasks endpoint.
+     * Throws on transport errors, non-200 responses and ClickUp {err} bodies —
+     * ClickUp returns errors with HTTP 200 sometimes, and a silently-empty page
+     * here would end up cached as a complete tree.
      */
-    _shouldProcess(selectAllFlag, itemsObject) {
-        return selectAllFlag || (itemsObject && Object.keys(itemsObject).length > 0);
+    async _getTeamTaskPage(queryPairs, page) {
+        const query = queryPairs.concat([`page=${page}`]).join('&');
+        const response = await throttledRequest({
+            method: 'GET',
+            url: `${teamRootUrl()}/task?${query}`,
+            headers: {
+                'Authorization': store.get('settings.clickup_access_token'),
+                'Content-Type': 'application/json'
+            }
+        });
+        if (response.statusCode !== 200) {
+            throw new Error(`Team task fetch failed with HTTP ${response.statusCode} (page ${page})`);
+        }
+        const body = JSON.parse(response.body);
+        if (body.err) {
+            throw new Error(`Team task fetch failed: ${body.err}`);
+        }
+        this.requests++; // count completed requests, not started ones
+        return body;
     },
 
     /*
-     * Helper: Fetches tasks for all lists and adds them as children
+     * Sweep all pages of /team/{id}/task for the given filter params
+     * (e.g. ['project_ids[]=123', 'project_ids[]=456']).
+     * Returns raw task objects; subtasks arrive as flat entries with .parent set.
      */
-    async _fetchTasksForLists(lists) {
-        if (lists.length === 0) return;
-
-        await Promise.all(lists.map(async (list) => {
-            const tasks = await this.withTimeoutAndRetry(() =>
-                this.getTasksFromList(list.id)
-            ).catch(e => {
-                console.error(e);
-                return [];
-            });
-            console.log(`Got ${tasks.length} tasks for list ${list.name} (${this.requests} rq)`);
-            list.addChildren(tasks);
-        })).catch(e => console.error(e));
+    async _sweepTeamTasks(filterPairs) {
+        const base = ['subtasks=true', 'include_closed=true'].concat(filterPairs);
+        const tasks = [];
+        let page = 0;
+        for (;;) {
+            const body = await this.withTimeoutAndRetry(() => this._getTeamTaskPage(base, page));
+            tasks.push(...(body.tasks || []));
+            // The API's own end-of-results flag; anything else means done
+            if (body.last_page === false) page++;
+            else break;
+        }
+        return tasks;
     },
 
     /*
-     * Internal: Fetches filtered hierarchy based on user selection
-     * Only fetches from selected spaces/folders/lists
-     * Supports selectAll* flags to include new items automatically
-     * Always fetches tasks for selected lists
+     * Translate the saved selection into team-task filter scopes.
+     * knownSpaceIds, when given, drops selection entries for spaces that no
+     * longer exist; pass null to keep every entry.
+     */
+    _deriveSelectionScopes(selection, knownSpaceIds) {
+        const folderScopes = [];    // selected folders → one project_ids[] sweep
+        const spaceListScopes = []; // explicitly selected space-level lists → one list_ids[] sweep
+        const spaceScopes = [];     // spaces with selectAll flags → one space_ids[] sweep
+        Object.entries(selection.spaces).forEach(([spaceId, spaceConfig]) => {
+            if (knownSpaceIds && !knownSpaceIds.has(spaceId)) return;
+            if (spaceConfig.selectAllFolders || spaceConfig.selectAllLists) {
+                spaceScopes.push(spaceId);
+            }
+            if (!spaceConfig.selectAllFolders) {
+                Object.values(spaceConfig.folders || {}).forEach(folderConfig => {
+                    folderScopes.push({ spaceId, folderConfig });
+                });
+            }
+            if (!spaceConfig.selectAllLists) {
+                Object.values(spaceConfig.lists || {}).forEach(listConfig => {
+                    spaceListScopes.push({ spaceId, listConfig });
+                });
+            }
+        });
+        return {folderScopes, spaceListScopes, spaceScopes};
+    },
+
+    _buildSweeps({folderScopes, spaceListScopes, spaceScopes}) {
+        const sweeps = [];
+        if (folderScopes.length > 0) {
+            sweeps.push({ label: `project_ids[] (${folderScopes.length} folders)`, pairs: folderScopes.map(f => `project_ids[]=${f.folderConfig.id}`) });
+        }
+        if (spaceListScopes.length > 0) {
+            sweeps.push({ label: `list_ids[] (${spaceListScopes.length} lists)`, pairs: spaceListScopes.map(l => `list_ids[]=${l.listConfig.id}`) });
+        }
+        if (spaceScopes.length > 0) {
+            sweeps.push({ label: `space_ids[] (${spaceScopes.length} spaces)`, pairs: spaceScopes.map(id => `space_ids[]=${id}`) });
+        }
+        return sweeps;
+    },
+
+    /*
+     * Selection semantics of the old container walk, applied per task:
+     * a task is in scope when its home list is selected — explicitly, via its
+     * folder's selectAllLists, via the space's selectAllFolders (foldered
+     * tasks) or the space's selectAllLists (folderless tasks).
+     * folder.hidden === true is ClickUp's marker for "folderless list".
+     */
+    _taskMatchesSelection(task, selection) {
+        if (!task.list || !task.space) return false;
+        const spaceConfig = selection.spaces[task.space.id];
+        if (!spaceConfig) return false;
+        const folderless = !task.folder || task.folder.hidden;
+        if (folderless) {
+            return !!(spaceConfig.selectAllLists || (spaceConfig.lists && spaceConfig.lists[task.list.id]));
+        }
+        if (spaceConfig.selectAllFolders) return true;
+        const folderConfig = spaceConfig.folders && spaceConfig.folders[task.folder.id];
+        if (!folderConfig) return false;
+        return !!(folderConfig.selectAllLists || (folderConfig.lists && folderConfig.lists[task.list.id]));
+    },
+
+    /*
+     * Internal: Fetches filtered hierarchy based on user selection.
+     * Instead of walking space → folder → list → tasks (hundreds of requests),
+     * this sweeps GET /team/{id}/task scoped to the selection — tasks carry
+     * their space/folder/list inline, so the tree is rebuilt from task payloads
+     * plus one getSpaces call and one getFolderedLists call per selected folder.
+     * Tasks are placed by their home list only; a list with zero tasks still
+     * appears when it was prefetched or explicitly selected, so the task
+     * creator can create into it.
      */
     async _getFilteredHierarchy(selection) {
-        console.log("Getting FILTERED hierarchy from ClickUp");
+        const startedAt = performance.now();
+        const pausesBefore = _rateLimitPauses;
+        console.log(`[${_logTime()}] Getting FILTERED hierarchy via team-task sweep`);
         console.log(`Selection: ${JSON.stringify(selection)}`);
 
         if (!selection || !selection.spaces) {
@@ -314,105 +519,356 @@ export default {
             return [];
         }
 
-        // Get all spaces first
-        const allSpaces = await this.getSpaces().catch(e => {
-            console.error(e);
-            return [];
-        });
+        // Spaces first: names/colors for the tree, and it feeds the factory's
+        // colorMap so the folders/lists/tasks built below inherit space colors.
+        // Not swallowed: without spaces the whole walk is empty, which must never be cached
+        const allSpaces = await this.withTimeoutAndRetry(() => this.getSpaces());
+        const spaceNodesById = new Map(allSpaces.map(space => [space.id, space]));
 
-        // Filter to selected spaces
-        const selectedSpaceIds = Object.keys(selection.spaces);
-        const filteredSpaces = allSpaces.filter(space => selectedSpaceIds.includes(space.id));
+        // Derive the sweep scope from the selection
+        const {folderScopes, spaceListScopes} = this._deriveSelectionScopes(selection, new Set(spaceNodesById.keys()));
 
-        console.log(`Filtered to ${filteredSpaces.length}/${allSpaces.length} spaces (${this.requests} rq)`);
-
-        if (filteredSpaces.length === 0) {
-            return [];
+        // Pre-build folder and list nodes for selected folders (one request per
+        // folder). This is what keeps lists with zero tasks visible.
+        // Values: {node, spaceId} for folders; {node, parentType, parentId} for lists.
+        const folderNodesById = new Map();
+        const listNodesById = new Map();
+        for (const { spaceId, folderConfig } of folderScopes) {
+            const folderNode = factory.createFolder({ id: folderConfig.id, name: folderConfig.name, space: { id: spaceId } });
+            folderNodesById.set(folderConfig.id, { node: folderNode, spaceId });
+            const allLists = await this.withTimeoutAndRetry(() => this.getFolderedLists(folderConfig.id));
+            const lists = folderConfig.selectAllLists
+                ? allLists
+                : allLists.filter(list => folderConfig.lists && folderConfig.lists[list.id]);
+            lists.forEach(list => listNodesById.set(list.id, { node: list, parentType: 'folder', parentId: folderConfig.id }));
+        }
+        // Explicitly selected space-level lists: built from the stored selection,
+        // no request needed
+        for (const { spaceId, listConfig } of spaceListScopes) {
+            if (listNodesById.has(listConfig.id)) continue;
+            const listNode = factory.createList({ id: listConfig.id, name: listConfig.name, space: { id: spaceId } });
+            listNodesById.set(listConfig.id, { node: listNode, parentType: 'space', parentId: spaceId });
         }
 
-        // For each selected space, fetch selected folders/lists
-        await Promise.all(filteredSpaces.map(async (space) => {
-            const spaceConfig = selection.spaces[space.id];
-            console.log(`Processing space: ${space.name} (${spaceConfig.folders ? Object.keys(spaceConfig.folders).length : 0} folders, ${spaceConfig.lists ? Object.keys(spaceConfig.lists).length : 0} lists)`);
+        // Sweep the team-task endpoint, one sweep per scope type (combined
+        // filter params have unverified semantics), deduped by task id
+        const sweeps = this._buildSweeps(this._deriveSelectionScopes(selection, new Set(spaceNodesById.keys())));
 
-            // Process folders if any are configured OR if selectAllFolders is true
-            if (this._shouldProcess(spaceConfig.selectAllFolders, spaceConfig.folders)) {
-                // Fetch all folders for this space
-                const allFolders = await this.withTimeoutAndRetry(() =>
-                    this.getFolders(space.id)
-                ).catch(e => {
-                    console.error(e);
-                    return [];
-                });
+        const rawTasksById = new Map();
+        for (const sweep of sweeps) {
+            const requestsBefore = this.requests;
+            const tasks = await this._sweepTeamTasks(sweep.pairs);
+            console.log(`[${_logTime()}] Sweep ${sweep.label}: ${tasks.length} tasks in ${this.requests - requestsBefore} page(s)`);
+            tasks.forEach(task => {
+                if (!rawTasksById.has(task.id)) rawTasksById.set(task.id, task);
+            });
+        }
 
-                // Filter to selected folders OR all if selectAllFolders is true
-                const filteredFolders = spaceConfig.selectAllFolders
-                    ? allFolders
-                    : allFolders.filter(folder => Object.keys(spaceConfig.folders).includes(folder.id));
+        // Bucket in-scope tasks by their home list
+        const tasksByListId = new Map();
+        for (const task of rawTasksById.values()) {
+            if (!this._taskMatchesSelection(task, selection)) continue;
+            if (!tasksByListId.has(task.list.id)) tasksByListId.set(task.list.id, []);
+            tasksByListId.get(task.list.id).push(task);
+        }
 
-                console.log(`Filtered to ${filteredFolders.length}/${allFolders.length} folders in space ${space.name} (${this.requests} rq)`);
+        // Lists we didn't prefetch (selectAll* space scopes): synthesize their
+        // containers from the task payloads. Empty lists can't appear for these
+        // scopes — there is no task to learn them from.
+        for (const [listId, tasks] of tasksByListId) {
+            if (listNodesById.has(listId)) continue;
+            const sample = tasks[0];
+            const spaceId = sample.space.id;
+            const listNode = factory.createList({ id: listId, name: sample.list.name, space: { id: spaceId } });
+            if (!sample.folder || sample.folder.hidden) {
+                listNodesById.set(listId, { node: listNode, parentType: 'space', parentId: spaceId });
+            } else {
+                if (!folderNodesById.has(sample.folder.id)) {
+                    const folderNode = factory.createFolder({ id: sample.folder.id, name: sample.folder.name, space: { id: spaceId } });
+                    folderNodesById.set(sample.folder.id, { node: folderNode, spaceId });
+                }
+                listNodesById.set(listId, { node: listNode, parentType: 'folder', parentId: sample.folder.id });
+            }
+        }
 
-                // For each selected folder, get its lists
-                await Promise.all(filteredFolders.map(async (folder) => {
-                    const folderConfig = (spaceConfig.folders && spaceConfig.folders[folder.id]) || {};
+        // Attach tasks to lists, then assemble lists → folders → spaces.
+        // Only spaces that end up owning content appear in the tree.
+        let acceptedTaskCount = 0;
+        for (const [listId, rawTasks] of tasksByListId) {
+            listNodesById.get(listId).node.addChildren(this._assignSubtasksToParentTasks(rawTasks));
+            acceptedTaskCount += rawTasks.length;
+        }
 
-                    // If selectAllFolders is true, treat each folder as having selectAllLists: true
-                    const shouldSelectAllLists = spaceConfig.selectAllFolders || folderConfig.selectAllLists;
+        const usedSpaceIds = new Set();
+        for (const { node, parentType, parentId } of listNodesById.values()) {
+            if (parentType === 'folder') {
+                folderNodesById.get(parentId).node.addChild(node);
+            } else if (spaceNodesById.has(parentId)) {
+                spaceNodesById.get(parentId).addChild(node);
+                usedSpaceIds.add(parentId);
+            }
+        }
+        for (const { node, spaceId } of folderNodesById.values()) {
+            if (spaceNodesById.has(spaceId)) {
+                spaceNodesById.get(spaceId).addChild(node);
+                usedSpaceIds.add(spaceId);
+            }
+        }
 
-                    // Fetch all lists in folder
-                    const allLists = await this.withTimeoutAndRetry(() =>
-                        this.getFolderedLists(folder.id)
-                    ).catch(e => {
-                        console.error(e);
-                        return [];
+        const result = allSpaces.filter(space => usedSpaceIds.has(space.id));
+
+        const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
+        console.log(`[${_logTime()}] Filtered hierarchy finished: ${result.length} spaces, ${listNodesById.size} lists, ${acceptedTaskCount} tasks, ${this.requests} requests, ${_rateLimitPauses - pausesBefore} rate-limit pause(s), ${elapsed}s`);
+        return result;
+    },
+
+    /*
+     * The selection currently in force, or null when hierarchy filtering is off
+     * or unconfigured (incremental refresh only applies to the filtered path)
+     */
+    _activeSelection() {
+        const filter = store.get('settings.hierarchy_filter');
+        if (!filter || !filter.enabled || !filter.selection) return null;
+        const spaces = filter.selection.spaces;
+        if (!spaces || Object.keys(spaces).length === 0) return null;
+        return filter.selection;
+    },
+
+    /*
+     * Fetch only the tasks that changed since sinceMs, over the same scopes the
+     * full sync uses. Typically one request per scope.
+     */
+    async _fetchHierarchyDelta(selection, sinceMs) {
+        this.requests = 0;
+        const sweeps = this._buildSweeps(this._deriveSelectionScopes(selection, null));
+        const rawTasksById = new Map();
+        for (const sweep of sweeps) {
+            const tasks = await this._sweepTeamTasks(sweep.pairs.concat([`date_updated_gt=${sinceMs}`]));
+            tasks.forEach(task => {
+                if (!rawTasksById.has(task.id)) rawTasksById.set(task.id, task);
+            });
+        }
+        return [...rawTasksById.values()];
+    },
+
+    /*
+     * Index a cached (plain, prototype-less) tree so the merge can find nodes
+     * and the array that holds them
+     */
+    _indexCachedHierarchy(tree) {
+        const spaces = new Map();
+        const folders = new Map();
+        const lists = new Map();
+        const tasks = new Map();
+
+        const indexTaskTree = (parent, listId) => {
+            (parent.children || []).forEach(child => {
+                if (child.type === ClickUpType.TASK || child.type === ClickUpType.SUBTASK) {
+                    tasks.set(child.id, {node: child, parent, listId});
+                    indexTaskTree(child, listId);
+                }
+            });
+        };
+
+        (tree || []).forEach(space => {
+            spaces.set(space.id, space);
+            (space.children || []).forEach(child => {
+                if (child.type === ClickUpType.FOLDER) {
+                    folders.set(child.id, {node: child, spaceId: space.id});
+                    (child.children || []).forEach(list => {
+                        if (list.type !== ClickUpType.LIST) return;
+                        lists.set(list.id, {node: list, spaceId: space.id});
+                        indexTaskTree(list, list.id);
                     });
-
-                    // Filter to selected lists OR all if selectAllLists is true
-                    const filteredLists = shouldSelectAllLists
-                        ? allLists
-                        : allLists.filter(list => Object.keys(folderConfig.lists || {}).includes(list.id));
-
-                    console.log(`Filtered to ${filteredLists.length}/${allLists.length} lists in folder ${folder.name} (${this.requests} rq)`);
-
-                    // Fetch tasks for each list
-                    await this._fetchTasksForLists(filteredLists);
-                    if (filteredLists.length > 0) {
-                        folder.addChildren(filteredLists);
-                    }
-                })).catch(e => console.error(e));
-
-                if (filteredFolders.length > 0) {
-                    space.addChildren(filteredFolders);
+                } else if (child.type === ClickUpType.LIST) {
+                    lists.set(child.id, {node: child, spaceId: space.id});
+                    indexTaskTree(child, child.id);
                 }
+            });
+        });
+
+        return {spaces, folders, lists, tasks};
+    },
+
+    /*
+     * Copy the mutable fields of a task payload onto a tree node. Patched in
+     * place rather than rebuilt so a re-parented task keeps its own subtasks.
+     */
+    _applyTaskFields(node, raw, spaceColor) {
+        node.value = raw.id;
+        node.name = raw.name;
+        node.label = raw.name;
+        node.custom_id = raw.custom_id || null;
+        node.date_closed = raw.date_closed != null ? raw.date_closed : null;
+        node.type = raw.parent != null ? ClickUpType.SUBTASK : ClickUpType.TASK;
+        node.disable = false;
+        if (spaceColor && !node.color) node.color = spaceColor;
+    },
+
+    /*
+     * Apply changed tasks to the cached tree in place.
+     * Returns the tree, or null when something can't be placed faithfully — the
+     * caller then falls back to a full sync rather than serving a tree with a
+     * silent gap in it.
+     */
+    _mergeDeltaIntoTree(tree, rawTasks, selection) {
+        const index = this._indexCachedHierarchy(tree);
+        const stats = {added: 0, updated: 0, moved: 0, removed: 0};
+
+        const forget = (node) => {
+            index.tasks.delete(node.id);
+            (node.children || []).forEach(forget);
+        };
+        const detach = (entry) => {
+            const siblings = entry.parent.children || [];
+            const at = siblings.indexOf(entry.node);
+            if (at !== -1) siblings.splice(at, 1);
+            forget(entry.node);
+        };
+
+        // Find or create the list a task belongs in. Folders are synthesised
+        // from the task payload; a missing space can't be (the team-task
+        // endpoint gives space ids only), so that forces a full sync.
+        const ensureList = (raw) => {
+            const known = index.lists.get(raw.list.id);
+            if (known) return known;
+            const spaceNode = index.spaces.get(raw.space.id);
+            if (!spaceNode) return null;
+            const listNode = factory.createList({id: raw.list.id, name: raw.list.name});
+            listNode.color = spaceNode.color;
+            let parentNode = spaceNode;
+            if (raw.folder && !raw.folder.hidden) {
+                let folderEntry = index.folders.get(raw.folder.id);
+                if (!folderEntry) {
+                    const folderNode = factory.createFolder({id: raw.folder.id, name: raw.folder.name});
+                    folderNode.color = spaceNode.color;
+                    if (!spaceNode.children) spaceNode.children = [];
+                    spaceNode.children.push(folderNode);
+                    folderEntry = {node: folderNode, spaceId: raw.space.id};
+                    index.folders.set(raw.folder.id, folderEntry);
+                }
+                parentNode = folderEntry.node;
+            }
+            if (!parentNode.children) parentNode.children = [];
+            parentNode.children.push(listNode);
+            const entry = {node: listNode, spaceId: raw.space.id};
+            index.lists.set(raw.list.id, entry);
+            return entry;
+        };
+
+        // Parents before children, so a subtask arriving with its brand-new
+        // parent finds it already in the tree
+        const ordered = [...rawTasks].sort((a, b) => (a.parent == null ? 0 : 1) - (b.parent == null ? 0 : 1));
+
+        for (const raw of ordered) {
+            const existing = index.tasks.get(raw.id);
+
+            // Swept but no longer selected — it moved out of scope, so drop it
+            if (!this._taskMatchesSelection(raw, selection)) {
+                if (existing) {
+                    detach(existing);
+                    stats.removed++;
+                }
+                continue;
             }
 
-            // Process space-level lists (not in folders) if any are configured OR if selectAllLists is true
-            if (this._shouldProcess(spaceConfig.selectAllLists, spaceConfig.lists)) {
-                // Fetch all space-level lists
-                const allLists = await this.withTimeoutAndRetry(() =>
-                    this.getLists(space.id)
-                ).catch(e => {
-                    console.error(e);
-                    return [];
-                });
+            const listEntry = ensureList(raw);
+            if (!listEntry) return null;
 
-                // Filter to selected lists OR all if selectAllLists is true
-                const filteredLists = spaceConfig.selectAllLists
-                    ? allLists
-                    : allLists.filter(list => Object.keys(spaceConfig.lists).includes(list.id));
-
-                console.log(`Filtered to ${filteredLists.length}/${allLists.length} space-level lists in ${space.name} (${this.requests} rq)`);
-
-                // Fetch tasks for each list
-                await this._fetchTasksForLists(filteredLists);
-                if (filteredLists.length > 0) {
-                    space.addChildren(filteredLists);
-                }
+            // Subtasks hang off their parent when we have it, otherwise off the
+            // list — degraded but visible, which beats vanishing
+            let container = listEntry.node;
+            if (raw.parent != null) {
+                const parentEntry = index.tasks.get(raw.parent);
+                if (parentEntry) container = parentEntry.node;
             }
-        })).catch(e => console.error(e));
 
-        console.log(`Filtered hierarchy complete (${this.requests} total requests)`);
-        return filteredSpaces;
+            const spaceColor = (index.spaces.get(raw.space.id) || {}).color;
+
+            if (existing) {
+                this._applyTaskFields(existing.node, raw, spaceColor);
+                if (existing.parent !== container) {
+                    const siblings = existing.parent.children || [];
+                    const at = siblings.indexOf(existing.node);
+                    if (at !== -1) siblings.splice(at, 1);
+                    _insertSortedByName(container, existing.node);
+                    index.tasks.set(raw.id, {node: existing.node, parent: container, listId: listEntry.node.id});
+                    stats.moved++;
+                } else {
+                    stats.updated++;
+                }
+                continue;
+            }
+
+            const node = raw.parent != null ? factory.createSubtask(raw) : factory.createTask(raw);
+            node.color = node.color || spaceColor;
+            _insertSortedByName(container, node);
+            index.tasks.set(raw.id, {node, parent: container, listId: listEntry.node.id});
+            stats.added++;
+        }
+
+        this._lastDeltaStats = stats;
+        return tree;
+    },
+
+    /*
+     * Bring a cached tree up to date without rebuilding it.
+     * Returns the tree to serve, or null when a full sync is required.
+     */
+    async _refreshCachedHierarchy(cached, selection) {
+        const fingerprint = _selectionFingerprint(selection);
+        const sync = cache.get(HIERARCHY_SYNC_CACHE_KEY);
+        let sinceMs;
+        let fullSyncAtMs;
+
+        if (sync && sync.lastSyncMs) {
+            // Scope changed under us — a delta can't pull in what was previously
+            // out of scope
+            if (sync.selectionFingerprint !== fingerprint) return null;
+            // Deltas never see deletions, so rebuild from scratch periodically
+            if (Date.now() - (sync.fullSyncAtMs || sync.lastSyncMs) > FULL_RESYNC_INTERVAL_MS) return null;
+            if (Date.now() - sync.lastSyncMs < DELTA_MIN_INTERVAL_MS) {
+                console.log(`Got hierarchy from cache (synced ${Math.round((Date.now() - sync.lastSyncMs) / 1000)}s ago)`);
+                return cached;
+            }
+            sinceMs = sync.lastSyncMs;
+            fullSyncAtMs = sync.fullSyncAtMs || sync.lastSyncMs;
+        } else {
+            // A tree cached before this feature existed: date it from its own
+            // cache expiry rather than resyncing 2,000 tasks or, worse,
+            // pretending it is current
+            const writtenAt = _cachedHierarchyWrittenAt();
+            if (!writtenAt) return null;
+            sinceMs = writtenAt;
+            fullSyncAtMs = writtenAt;
+        }
+
+        const sweepStartedAt = Date.now();
+        let rawTasks;
+        try {
+            rawTasks = await this._fetchHierarchyDelta(selection, sinceMs - DELTA_OVERLAP_MS);
+        } catch (e) {
+            // Quiet on purpose: the cached tree is intact and complete as of the
+            // last sync, and the timestamp isn't advanced, so the next open retries
+            console.warn(`[${_logTime()}] Hierarchy delta refresh failed, serving cached tree: ${e.message}`);
+            return cached;
+        }
+
+        // Re-read immediately before merging: the renderer writes this same key
+        // when it injects a task found outside the filter, and that write may
+        // have landed while the delta was in flight
+        const base = cache.get(HIERARCHY_CACHE_KEY) || cached;
+        const merged = this._mergeDeltaIntoTree(base, rawTasks, selection);
+        if (!merged) {
+            console.log(`[${_logTime()}] Hierarchy delta touched an unknown space — falling back to a full sync`);
+            return null;
+        }
+
+        const stats = this._lastDeltaStats;
+        cache.put(HIERARCHY_CACHE_KEY, merged, CACHE_DEFAULT);
+        cache.put(HIERARCHY_SYNC_CACHE_KEY, {lastSyncMs: sweepStartedAt, fullSyncAtMs, selectionFingerprint: fingerprint}, CACHE_DEFAULT);
+        console.log(`[${_logTime()}] Hierarchy delta: ${rawTasks.length} changed task(s) in ${this.requests} request(s) — ${stats.added} added, ${stats.updated} updated, ${stats.moved} moved, ${stats.removed} removed`);
+        return merged;
     },
 
     /*
@@ -421,12 +877,12 @@ export default {
      */
     async getHierarchyMetadata() {
         this.requests = 0;
-        console.log("Getting hierarchy metadata (no tasks) from ClickUp");
+        const startedAt = performance.now();
+        const pausesBefore = _rateLimitPauses;
+        console.log(`[${_logTime()}] Getting hierarchy metadata (no tasks) from ClickUp`);
 
-        const spaces = await this.getSpaces().catch(e => {
-            console.error(e);
-            return [];
-        });
+        // Not swallowed: without spaces the whole walk is empty, which must never be cached
+        const spaces = await this.withTimeoutAndRetry(() => this.getSpaces());
 
         console.log(`Got ${spaces.length} spaces from ClickUp (${this.requests} rq)`);
 
@@ -468,6 +924,9 @@ export default {
                 }
             })).catch(e => console.error(e));
 
+            const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
+            console.log(`[${_logTime()}] Hierarchy metadata walk finished: ${spaces.length} spaces, ${this.requests} requests, ${_rateLimitPauses - pausesBefore} rate-limit pause(s), ${elapsed}s`);
+
             return spaces;
         }
 
@@ -483,9 +942,21 @@ export default {
                 return cached
             }
 
-            let metadata = await this.getHierarchyMetadata().catch(e => {
-                console.error(e)
-            })
+            // Snapshot rather than reset: an overlapping walk must not be able to
+            // zero this walk's failure count
+            const failedBefore = this.failedFetches
+
+            let metadata = await this.getHierarchyMetadata()
+
+            if (this.failedFetches > failedBefore) {
+                throw new Error(`Hierarchy metadata fetch incomplete: ${this.failedFetches - failedBefore} request(s) failed after retries; not caching partial data`)
+            }
+
+            // The workspace always has spaces, so an empty tree means truncation
+            if (!metadata || metadata.length === 0) {
+                throw new Error('Hierarchy metadata fetch returned no spaces; not caching')
+            }
+
             return cache.put(
                 HIERARCHY_METADATA_CACHE_KEY,
                 metadata,
@@ -493,6 +964,7 @@ export default {
             )
         } catch (e) {
             console.error(e)
+            throw e
         }
     },
 
@@ -515,7 +987,6 @@ export default {
     * Get all spaces from a team
      */
     async getSpaces() {
-        this.requests++;
         const response = await throttledRequest({
             method: 'GET',
             mode: 'no-cors',
@@ -525,6 +996,7 @@ export default {
                 'Content-Type': 'application/json'
             }
         });
+        this.requests++; // count completed requests, not started ones
         const spaces = JSON.parse(response.body).spaces || [];
         return spaces.map(space => factory.createSpace(space));
     },
@@ -556,7 +1028,6 @@ export default {
     * Get all folders from a space
     */
     async getFolders(spaceId) {
-        this.requests++;
         const response = await throttledRequest({
             method: 'GET',
             url: `${BASE_URL}/space/${spaceId}/folder?archived=false`,
@@ -565,6 +1036,7 @@ export default {
                 'Content-Type': 'application/json'
             }
         });
+        this.requests++; // count completed requests, not started ones
         const folders = JSON.parse(response.body).folders || [];
         return folders.map(folder => factory.createFolder(folder));
     },
@@ -573,7 +1045,6 @@ export default {
     * Get all lists from a folder
     */
     async getFolderedLists(FolderId) {
-        this.requests++;
         const response = await throttledRequest({
             method: 'GET',
             url: `${BASE_URL}/folder/${FolderId}/list?archived=false`,
@@ -582,6 +1053,7 @@ export default {
                 'Content-Type': 'application/json'
             }
         });
+        this.requests++; // count completed requests, not started ones
         const lists = JSON.parse(response.body).lists || [];
         return lists.map(list => factory.createList(list));
     },
@@ -607,7 +1079,6 @@ export default {
         })
     },
     async getLists(spaceId) {
-        this.requests++;
         const response = await throttledRequest({
             method: 'GET',
             mode: 'no-cors',
@@ -617,6 +1088,7 @@ export default {
                 'Content-Type': 'application/json'
             }
         });
+        this.requests++; // count completed requests, not started ones
         const lists = JSON.parse(response.body).lists || [];
         return lists.map(list => factory.createList(list));
     },
@@ -673,8 +1145,6 @@ export default {
         let hasMore = true;
 
         while (hasMore) {
-            this.requests++;
-
             try {
                 const response = await throttledRequest({
                     method: 'GET',
@@ -691,6 +1161,7 @@ export default {
                         'Content-Type': 'application/json'
                     }
                 });
+                this.requests++; // count completed requests, not started ones
                 const results = JSON.parse(response.body).tasks || [];
 
                 tasks.push(...results);
@@ -699,6 +1170,7 @@ export default {
 
             } catch (e) {
                 console.error(`Error fetching tasks for page ${page}:`, e);
+                this.failedFetches++; // A half-fetched list is truncation too
                 hasMore = false; // Stop on error
             }
         }
