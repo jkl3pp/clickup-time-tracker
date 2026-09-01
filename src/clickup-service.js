@@ -331,8 +331,9 @@ export default {
                 await Promise.all(spaces.map(async (space) => {
                     console.log(`Getting folders and lists for space ${space.name} (${this.requests} rq)`);
 
-                    // Fetch folders with retry and timeout logic
-                    const folders = await this.withTimeoutAndRetry(() => this.getFolders(space.id)).catch(e => {
+                    // Fetch folders with retry and timeout logic. The folders arrive with
+                    // their lists already attached, so there is no per-folder list request.
+                    const folders = await this.withTimeoutAndRetry(() => this.getFolders(space.id, true)).catch(e => {
                         console.error(e);
                         return [];
                     });
@@ -340,10 +341,8 @@ export default {
 
                     if (folders.length > 0) {
                         await Promise.all(folders.map(async (folder) => {
-                            const folderLists = await this.withTimeoutAndRetry(() => this.getFolderedLists(folder.id)).catch(e => {
-                                console.error(e);
-                                return [];
-                            });
+                            // Already attached by getFolders — don't re-add, addChild appends
+                            const folderLists = folder.children || [];
                             console.log(`Got ${folderLists.length} lists for folder ${folder.name} (space ${space.name}) (${this.requests} rq)`);
 
                             if (folderLists.length > 0) {
@@ -355,7 +354,6 @@ export default {
                                     console.log(`Got ${tasks.length} tasks for list ${folderList.name} (${this.requests} rq)`);
                                     folderList.addChildren(tasks);
                                 })).catch(e => console.error(e));
-                                folder.addChildren(folderLists);
                             }
                         })).catch(e => console.error(e));
                         space.addChildren(folders);
