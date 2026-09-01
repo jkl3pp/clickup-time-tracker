@@ -890,25 +890,16 @@ export default {
             await Promise.all(spaces.map(async (space) => {
                 console.log(`Getting folders and lists for space ${space.name} (${this.requests} rq)`);
 
-                // Fetch folders with retry and timeout logic
-                const folders = await this.withTimeoutAndRetry(() => this.getFolders(space.id)).catch(e => {
+                // Fetch folders with retry and timeout logic. The folders come back
+                // with their lists inline, so there is no per-folder list request —
+                // that alone was ~276 of the walk's ~393 requests.
+                const folders = await this.withTimeoutAndRetry(() => this.getFolders(space.id, true)).catch(e => {
                     console.error(e);
                     return [];
                 });
                 console.log(`Got ${folders.length} folders for space ${space.name} (${this.requests} rq)`);
 
                 if (folders.length > 0) {
-                    await Promise.all(folders.map(async (folder) => {
-                        const folderLists = await this.withTimeoutAndRetry(() => this.getFolderedLists(folder.id)).catch(e => {
-                            console.error(e);
-                            return [];
-                        });
-                        console.log(`Got ${folderLists.length} lists for folder ${folder.name} (${this.requests} rq)`);
-                        // Don't fetch tasks - just add lists
-                        if (folderLists.length > 0) {
-                            folder.addChildren(folderLists);
-                        }
-                    })).catch(e => console.error(e));
                     space.addChildren(folders);
                 }
 
@@ -1026,8 +1017,14 @@ export default {
 
     /*
     * Get all folders from a space
+    *
+    * With withLists, each folder is returned with the lists ClickUp already
+    * embeds in this response attached as children, saving one
+    * getFolderedLists request per folder. Verified 2026-09-01 across 277
+    * folders: the inline lists[] matches GET /folder/{id}/list?archived=false
+    * exactly on ids and names, and carries no archived lists.
     */
-    async getFolders(spaceId) {
+    async getFolders(spaceId, withLists = false) {
         const response = await throttledRequest({
             method: 'GET',
             url: `${BASE_URL}/space/${spaceId}/folder?archived=false`,
@@ -1038,7 +1035,13 @@ export default {
         });
         this.requests++; // count completed requests, not started ones
         const folders = JSON.parse(response.body).folders || [];
-        return folders.map(folder => factory.createFolder(folder));
+        return folders.map(folder => {
+            const folderItem = factory.createFolder(folder);
+            if (withLists && Array.isArray(folder.lists) && folder.lists.length > 0) {
+                folderItem.addChildren(folder.lists.map(list => factory.createList(list)));
+            }
+            return folderItem;
+        });
     },
 
     /*
