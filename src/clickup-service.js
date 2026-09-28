@@ -26,36 +26,93 @@ function _logTime() {
     return new Date().toLocaleTimeString('en-GB'); // HH:MM:SS, 24h
 }
 
-// Global rate-limit gate — one shared pause for all requests instead of each
-// 429'd request sleeping (and logging) on its own
-let _rateLimitGate = null; // non-null while a pause is in effect
-let _rateLimitPauses = 0; // how many pauses so far, reported in walk summaries
-let _completedThisWindow = 0; // successful requests since the last pause ended
-let _lastRateLimitHeaders = ''; // e.g. "remaining 57/100", from the most recent response
+// Rate-limit gates, one per token — one shared pause for all requests on that
+// token instead of each 429'd request sleeping (and logging) on its own.
+// ClickUp's limit is per token (verified 2026-09-28: with the main token at 429,
+// a second personal token of the same user still had its full budget), so bulk
+// requests alternate between the main token and an optional secondary one, each
+// with its own pause. Interactive requests don't come through here and stay on
+// the main token.
+let _rateLimitPauses = 0; // how many pauses so far (all tokens), reported in walk summaries
+const _tokenStates = {}; // per-token gate state, keyed by 'main' / 'secondary'
+let _nextTokenIndex = 0; // round-robin position
 
-function _pauseForRateLimit(seconds) {
-    if (_rateLimitGate) return _rateLimitGate; // join the pause already in progress
+function _tokenState(label) {
+    if (!_tokenStates[label]) {
+        _tokenStates[label] = {
+            gate: null, // non-null while a pause is in effect
+            completedThisWindow: 0, // successful requests since the last pause ended
+            lastHeaders: '', // e.g. "remaining 57/100", from the most recent response
+            rejectedToken: null, // a token ClickUp refused (401), not used again this session
+        };
+    }
+    return _tokenStates[label];
+}
+
+// store.get re-reads and re-parses the whole config file (which also holds the
+// cached hierarchy), so the secondary token is re-read at most once a second
+let _secondaryToken = null;
+let _secondaryTokenReadAt = 0;
+
+function _currentSecondaryToken() {
+    const now = Date.now();
+    if (now - _secondaryTokenReadAt > 1000) {
+        _secondaryToken = store.get('settings.clickup_secondary_access_token') || null;
+        _secondaryTokenReadAt = now;
+    }
+    return _secondaryToken;
+}
+
+// The main token comes from the caller's own Authorization header
+function _bulkTokens(main) {
+    const secondary = _currentSecondaryToken();
+    const tokens = [{label: 'main', token: main}];
+    if (secondary && secondary !== main && secondary !== _tokenState('secondary').rejectedToken) {
+        tokens.push({label: 'secondary', token: secondary});
+    }
+    return tokens;
+}
+
+// Next token in rotation that isn't paused, or null if every token is paused
+function _pickToken(tokens) {
+    for (let i = 0; i < tokens.length; i++) {
+        const index = (_nextTokenIndex + i) % tokens.length;
+        if (!_tokenState(tokens[index].label).gate) {
+            _nextTokenIndex = (index + 1) % tokens.length;
+            return tokens[index];
+        }
+    }
+    return null;
+}
+
+function _pauseForRateLimit(label, seconds) {
+    const state = _tokenState(label);
+    if (state.gate) return state.gate; // join the pause already in progress
     _rateLimitPauses++;
-    console.warn(`[${_logTime()}] ClickUp rate limit hit after ${_completedThisWindow} successful requests this window — pausing all requests for ${seconds}s (last seen x-ratelimit: ${_lastRateLimitHeaders || 'n/a'})`);
-    _rateLimitGate = new Promise(resolve => setTimeout(() => {
-        _rateLimitGate = null;
-        _completedThisWindow = 0;
-        console.log(`[${_logTime()}] Rate-limit pause over — resuming requests`);
+    console.warn(`[${_logTime()}] ClickUp rate limit hit on the ${label} token after ${state.completedThisWindow} successful requests this window — pausing its requests for ${seconds}s (last seen x-ratelimit: ${state.lastHeaders || 'n/a'})`);
+    state.gate = new Promise(resolve => setTimeout(() => {
+        state.gate = null;
+        state.completedThisWindow = 0;
+        console.log(`[${_logTime()}] Rate-limit pause over on the ${label} token — resuming its requests`);
         resolve();
     }, seconds * 1000));
-    return _rateLimitGate;
+    return state.gate;
 }
 
 async function throttledRequest(options) {
     // eslint-disable-next-line no-constant-condition
     while (true) {
-        if (_rateLimitGate) await _rateLimitGate; // wait out a global pause before taking a slot
+        const tokens = _bulkTokens(options.headers && options.headers['Authorization']);
+        const gates = tokens.map(t => _tokenState(t.label).gate);
+        if (gates.every(Boolean)) { await Promise.race(gates); continue; } // every token paused — wait for the first to reopen
         await _acquireSlot();
-        if (_rateLimitGate) { _releaseSlot(); continue; } // pause began while we waited for a slot
+        const picked = _pickToken(tokens);
+        if (!picked) { _releaseSlot(); continue; } // pauses began while we waited for a slot
+        const state = _tokenState(picked.label);
         let response;
         try {
             response = await new Promise((resolve, reject) => {
-                request({ timeout: DEFAULT_CLICKUP_TIMEOUT, ...options }, (error, response) => {
+                request({ timeout: DEFAULT_CLICKUP_TIMEOUT, ...options, headers: {...options.headers, 'Authorization': picked.token} }, (error, response) => {
                     if (error) reject(error);
                     else resolve(response);
                 });
@@ -65,13 +122,29 @@ async function throttledRequest(options) {
             _releaseSlot();
         }
         if (response.headers['x-ratelimit-remaining'] !== undefined) {
-            _lastRateLimitHeaders = `remaining ${response.headers['x-ratelimit-remaining']}/${response.headers['x-ratelimit-limit'] || '?'}`;
+            state.lastHeaders = `remaining ${response.headers['x-ratelimit-remaining']}/${response.headers['x-ratelimit-limit'] || '?'}`;
+        }
+        if (response.statusCode === 401 && picked.label === 'secondary') {
+            // A revoked secondary token must not hand callers error bodies for half
+            // the walk — drop it and retry on the main token
+            state.rejectedToken = picked.token;
+            console.warn(`[${_logTime()}] ClickUp refused the secondary access token (HTTP 401) — using only the main token for the rest of this session`);
+            continue;
+        }
+        if (response.statusCode === 401 && tokens.length > 1) {
+            // With the secondary still working, handing this back would let callers
+            // read an error body as "no folders" for half the walk and cache a
+            // partial tree. Throwing lets the retry wrapper try the other token,
+            // and count a failure if it can't.
+            throw new Error('ClickUp refused the main access token (HTTP 401)');
         }
         if (response.statusCode !== 429) {
-            _completedThisWindow++;
+            state.completedThisWindow++;
             return response;
         }
-        await _pauseForRateLimit(parseInt(response.headers['retry-after'] || '5', 10));
+        // Start (or join) this token's pause; the retry goes to another token if
+        // one is open, otherwise waits at the top of the loop
+        _pauseForRateLimit(picked.label, parseInt(response.headers['retry-after'] || '5', 10));
     }
 }
 
@@ -169,6 +242,43 @@ export default {
                 resolve(true)
             });
         })
+    },
+
+    /*
+     * Checks an optional secondary token: empty is fine, otherwise it must be
+     * valid and belong to the same user as the main token, or bulk requests
+     * would mix another user's view into the tree. Unlike tokenValid this
+     * stores nothing.
+     */
+    async secondaryTokenValid(token, mainToken) {
+        if (!token) return true;
+        if (!mainToken) throw new Error("Enter the main access token first.");
+        if (token === mainToken) throw new Error("This is the same token as the main access token. Generate a second one in ClickUp.");
+
+        const userFor = (t) => new Promise((resolve, reject) => {
+            request({
+                method: 'GET',
+                url: `${BASE_URL}/user`,
+                headers: {
+                    'Authorization': t,
+                    'Content-Type': 'application/json'
+                },
+                timeout: DEFAULT_CLICKUP_TIMEOUT,
+            }, (error, response) => {
+                if (error) return reject(error)
+                try {
+                    resolve(JSON.parse(response.body).user || null)
+                } catch (e) {
+                    resolve(null)
+                }
+            });
+        });
+
+        const [user, mainUser] = await Promise.all([userFor(token), userFor(mainToken)]);
+        if (!user) throw new Error("This token couldn't be validated with ClickUp. Please verify.");
+        if (!mainUser) throw new Error("Couldn't verify the main access token, so this one can't be checked against it.");
+        if (user.id !== mainUser.id) throw new Error("This token belongs to a different ClickUp user than the main access token.");
+        return true;
     },
 
     async getCurrentUserId() {

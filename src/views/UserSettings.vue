@@ -9,6 +9,10 @@
         <n-input v-model:value="model.clickup_access_token" clearable class="dark:bg-gray-800 dark:text-gray-200" />
       </n-form-item>
 
+      <n-form-item label="Secondary access token (optional, speeds up loading)" path="clickup_secondary_access_token" placeholder="pk_">
+        <n-input v-model:value="model.clickup_secondary_access_token" clearable class="dark:bg-gray-800 dark:text-gray-200" />
+      </n-form-item>
+
       <n-form-item label="ClickUp Team ID" path="clickup_team_id">
         <n-input v-model:value="model.clickup_team_id" clearable class="dark:bg-gray-800 dark:text-gray-200" />
       </n-form-item>
@@ -816,6 +820,13 @@ export default {
             required: true,
             validator: (rule, value) => clickupService.tokenValid(value),
             message: "This token couldn't be validated with ClickUp. Please verify.",
+            trigger: ['blur']
+          }
+        ],
+        clickup_secondary_access_token: [
+          {
+            // No `message` here: the validator's own error says what's wrong
+            validator: (rule, value) => clickupService.secondaryTokenValid(value, model.value.clickup_access_token),
             trigger: ['blur']
           }
         ],
