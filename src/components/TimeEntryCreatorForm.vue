@@ -18,6 +18,7 @@ import {Folder, List, Planet} from '@vicons/ionicons5'
 import {CircleFilled} from "@vicons/carbon";
 import {computed, defineEmits, h, nextTick, onMounted, ref, watch} from "vue";
 import {ipcRenderer} from 'electron';
+import {useRouter} from "vue-router";
 import clickupService from "@/clickup-service";
 import store from "@/store";
 import {cloneDeep} from "lodash";
@@ -56,6 +57,17 @@ let loadingCreate = ref(false);
 let mentionable = ref([]);
 const withClosed = ref(false);
 const withSubtasks = ref(true);
+
+// Filtering on with nothing selected fetches no tasks at all (fresh installs
+// start this way), so the picker would be empty with no explanation
+const router = useRouter();
+const nothingSelected = (() => {
+  const filter = store.get('settings.hierarchy_filter');
+  if (!filter?.enabled) return false;
+  if (!filter.selection?.spaces) return true;
+  const {folderScopes, spaceListScopes, spaceScopes} = clickupService._deriveSelectionScopes(filter.selection);
+  return folderScopes.length === 0 && spaceListScopes.length === 0 && spaceScopes.length === 0;
+})();
 
 const showCreateTaskModal = ref(false);
 const taskCreatorFormRef = ref(null);
@@ -820,7 +832,9 @@ onMounted(async () => {
               :placeholder="
                 loadingClickup
                   ? 'Loading tasks...'
-                  : 'Select a task or subtask'
+                  : nothingSelected
+                    ? 'No lists selected yet (see Settings)'
+                    : 'Select a task or subtask'
               "
               :size="'large'"
               :clearable="true"
@@ -857,6 +871,12 @@ onMounted(async () => {
               </div>
             </template>
             <template #empty>
+              <div v-if="nothingSelected" class="px-3 pt-4 text-sm text-gray-600 dark:text-gray-300">
+                No lists are selected for tracking yet.
+                <span class="text-blue-600 dark:text-blue-400 cursor-pointer hover:underline"
+                      @mousedown.prevent.stop="router.push({ name: 'settings' })">Open Settings</span>,
+                load the hierarchy under Hierarchy Selection and tick the lists you work in.
+              </div>
               <task-search-fallback
                   :pattern="searchPattern"
                   @tasks-found="onTasksFoundFromFallback"

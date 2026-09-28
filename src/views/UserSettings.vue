@@ -10,7 +10,13 @@
       </n-form-item>
 
       <n-form-item label="Secondary access token (optional, speeds up loading)" path="clickup_secondary_access_token" placeholder="pk_">
-        <n-input v-model:value="model.clickup_secondary_access_token" clearable class="dark:bg-gray-800 dark:text-gray-200" />
+        <div class="w-full">
+          <n-input v-model:value="model.clickup_secondary_access_token" clearable class="dark:bg-gray-800 dark:text-gray-200" />
+          <div class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+            A second personal API token from your own ClickUp account. ClickUp limits requests per token, so
+            loading is split across both: Load Hierarchy takes seconds instead of about a minute.
+          </div>
+        </div>
       </n-form-item>
 
       <n-form-item label="ClickUp Team ID" path="clickup_team_id">
@@ -106,6 +112,10 @@
               {{ hierarchyLoaded ? 'Refresh' : 'Load' }} Hierarchy
             </n-button>
 
+            <span v-if="loadingHierarchy && hierarchyProgressText" class="self-center text-sm text-gray-500 dark:text-gray-400">
+              {{ hierarchyProgressText }}
+            </span>
+
             <n-button v-if="hierarchyLoaded" @click="selectAllHierarchy" secondary type="success">
               Select All
             </n-button>
@@ -140,7 +150,9 @@
             <template #icon><arrow-path-icon class="w-4" /></template>
             Load hierarchy
           </n-button>
-          <span class="text-sm text-gray-500 dark:text-gray-400">Required to configure shortcuts</span>
+          <span class="text-sm text-gray-500 dark:text-gray-400">
+            {{ loadingHierarchy && hierarchyProgressText ? hierarchyProgressText : 'Required to configure shortcuts' }}
+          </span>
         </div>
 
         <n-form-item :show-label="false" :show-feedback="false" path="search_shortcuts">
@@ -313,7 +325,7 @@
 </template>
 
 <script>
-import { h, ref, onMounted } from "vue";
+import { h, ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { useRouter } from "vue-router";
 import {
   NForm,
@@ -393,6 +405,14 @@ export default {
     const loadingHierarchy = ref(false);
     const hierarchyTreeOptions = ref([]);
     const selectedHierarchyKeys = ref([]);
+    // {done, total, waitSeconds} from the main process while a walk runs
+    const hierarchyProgress = ref(null);
+    const hierarchyProgressText = computed(() => {
+      const p = hierarchyProgress.value;
+      if (!p) return '';
+      const text = p.total > 0 ? `Loading… ${Math.round(100 * p.done / p.total)}%` : 'Loading…';
+      return p.waitSeconds > 0 ? `${text} (waiting for ClickUp rate limit, ${p.waitSeconds} s)` : text;
+    });
 
     const clickUpTypeOptions = [
       {
@@ -428,6 +448,9 @@ export default {
     }
 
     async function loadHierarchyForSelection(forceRefresh = false) {
+      // On a refresh the tree stays editable; keep ticks made meanwhile
+      const wasLoaded = hierarchyLoaded.value;
+
       // Delay showing loading indicator to avoid flash for cached data
       const loadingTimeout = setTimeout(() => {
         loadingHierarchy.value = true;
@@ -439,6 +462,11 @@ export default {
           const eventName = forceRefresh ? "refresh-clickup-hierarchy-metadata" : "get-clickup-hierarchy-metadata";
           ipcRenderer.removeAllListeners("set-clickup-hierarchy-metadata");
           ipcRenderer.removeAllListeners("fetch-clickup-hierarchy-metadata-error");
+          ipcRenderer.removeAllListeners("clickup-hierarchy-metadata-progress");
+          hierarchyProgress.value = null;
+          ipcRenderer.on("clickup-hierarchy-metadata-progress", (event, progress) => {
+            hierarchyProgress.value = progress;
+          });
           ipcRenderer.send(eventName);
           ipcRenderer.once("set-clickup-hierarchy-metadata", (event, data) => {
             resolve(data);
@@ -455,7 +483,7 @@ export default {
         hierarchyTreeOptions.value = transformToTreeSelectFormat(hierarchy);
 
         // Load existing selection if any
-        if (model.value.hierarchy_filter?.selection) {
+        if (!wasLoaded && model.value.hierarchy_filter?.selection) {
           selectedHierarchyKeys.value = extractSelectedKeys(model.value.hierarchy_filter.selection);
         }
 
@@ -473,6 +501,8 @@ export default {
         });
       } finally {
         loadingHierarchy.value = false;
+        ipcRenderer.removeAllListeners("clickup-hierarchy-metadata-progress");
+        hierarchyProgress.value = null;
       }
     }
 
@@ -724,6 +754,14 @@ export default {
       }
     });
 
+    // A walk outlives Cancel/Save: don't let it toast on the calendar afterwards.
+    // The walk itself still finishes and caches its result.
+    onBeforeUnmount(() => {
+      ipcRenderer.removeAllListeners("set-clickup-hierarchy-metadata");
+      ipcRenderer.removeAllListeners("fetch-clickup-hierarchy-metadata-error");
+      ipcRenderer.removeAllListeners("clickup-hierarchy-metadata-progress");
+    });
+
     return {
       form,
       model,
@@ -733,6 +771,7 @@ export default {
       // Hierarchy selection
       hierarchyLoaded,
       loadingHierarchy,
+      hierarchyProgressText,
       hierarchyTreeOptions,
       selectedHierarchyKeys,
       onHierarchyFilterToggle,

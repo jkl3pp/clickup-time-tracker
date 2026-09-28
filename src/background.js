@@ -41,9 +41,14 @@ ipcMain.on('refresh-clickup-hierarchy', (event) => {
         .catch(err => event.reply('fetch-clickup-hierarchy-error', err))
 })
 
+// Walk progress for the Settings page; the window may be gone by the time it fires
+const metadataProgress = (event) => (progress) => {
+    if (!event.sender.isDestroyed()) event.sender.send('clickup-hierarchy-metadata-progress', progress)
+}
+
 // Fetch ClickUp hierarchy metadata (no tasks) for settings UI
 ipcMain.on('get-clickup-hierarchy-metadata', (event) => {
-    clickupService.getCachedHierarchyMetadata()
+    clickupService.getCachedHierarchyMetadata(metadataProgress(event))
         .then(hierarchy => event.reply('set-clickup-hierarchy-metadata', hierarchy))
         .catch(err => event.reply('fetch-clickup-hierarchy-metadata-error', err))
 })
@@ -52,7 +57,7 @@ ipcMain.on('get-clickup-hierarchy-metadata', (event) => {
 ipcMain.on('refresh-clickup-hierarchy-metadata', (event) => {
     // Clear metadata cache and fetch fresh
     cache.clear('hierarchy_metadata')
-    clickupService.getCachedHierarchyMetadata()
+    clickupService.getCachedHierarchyMetadata(metadataProgress(event))
         .then(hierarchy => event.reply('set-clickup-hierarchy-metadata', hierarchy))
         .catch(err => event.reply('fetch-clickup-hierarchy-metadata-error', err))
 })

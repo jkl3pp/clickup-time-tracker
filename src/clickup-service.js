@@ -41,6 +41,7 @@ function _tokenState(label) {
     if (!_tokenStates[label]) {
         _tokenStates[label] = {
             gate: null, // non-null while a pause is in effect
+            pausedUntil: 0, // Date.now() at which the current pause ends
             completedThisWindow: 0, // successful requests since the last pause ended
             lastHeaders: '', // e.g. "remaining 57/100", from the most recent response
             rejectedToken: null, // a token ClickUp refused (401), not used again this session
@@ -90,13 +91,26 @@ function _pauseForRateLimit(label, seconds) {
     if (state.gate) return state.gate; // join the pause already in progress
     _rateLimitPauses++;
     console.warn(`[${_logTime()}] ClickUp rate limit hit on the ${label} token after ${state.completedThisWindow} successful requests this window — pausing its requests for ${seconds}s (last seen x-ratelimit: ${state.lastHeaders || 'n/a'})`);
+    state.pausedUntil = Date.now() + seconds * 1000;
     state.gate = new Promise(resolve => setTimeout(() => {
         state.gate = null;
+        state.pausedUntil = 0;
         state.completedThisWindow = 0;
         console.log(`[${_logTime()}] Rate-limit pause over on the ${label} token — resuming its requests`);
         resolve();
     }, seconds * 1000));
     return state.gate;
+}
+
+// Seconds until bulk requests can go out again: 0 while any token in rotation
+// is open, else until the first one reopens. Shown in the Settings progress.
+function _rateLimitWaitSeconds() {
+    const labels = ['main'];
+    const secondary = _currentSecondaryToken();
+    if (secondary && secondary !== _tokenState('secondary').rejectedToken) labels.push('secondary');
+    const until = labels.map(label => _tokenState(label).pausedUntil);
+    if (until.some(u => u <= Date.now())) return 0;
+    return Math.ceil((Math.min(...until) - Date.now()) / 1000);
 }
 
 async function throttledRequest(options) {
@@ -175,6 +189,9 @@ const FULL_RESYNC_INTERVAL_MS = CACHE_DEFAULT * 1000; // deltas can't see deleti
 // One in-flight hierarchy load at a time. The main process preloads on startup
 // while the renderer asks on mount, and both used to run the whole thing twice.
 let _hierarchyInFlight = null;
+// Same for the Settings metadata walk: reopening Settings mid-walk started a
+// second one, and two at once pushed both tokens into a 60 s rate-limit pause.
+let _metadataInFlight = null;
 
 // Cheap stable digest of the saved selection — a delta is only valid while the
 // scope it was fetched for is unchanged
@@ -253,7 +270,7 @@ export default {
     async secondaryTokenValid(token, mainToken) {
         if (!token) return true;
         if (!mainToken) throw new Error("Enter the main access token first.");
-        if (token === mainToken) throw new Error("This is the same token as the main access token. Generate a second one in ClickUp.");
+        if (token === mainToken) throw new Error("Same token as the main one. Generate a second one in ClickUp.");
 
         const userFor = (t) => new Promise((resolve, reject) => {
             request({
@@ -275,9 +292,9 @@ export default {
         });
 
         const [user, mainUser] = await Promise.all([userFor(token), userFor(mainToken)]);
-        if (!user) throw new Error("This token couldn't be validated with ClickUp. Please verify.");
-        if (!mainUser) throw new Error("Couldn't verify the main access token, so this one can't be checked against it.");
-        if (user.id !== mainUser.id) throw new Error("This token belongs to a different ClickUp user than the main access token.");
+        if (!user) throw new Error("ClickUp didn't accept this token. Please verify.");
+        if (!mainUser) throw new Error("Couldn't verify the main token to compare against.");
+        if (user.id !== mainUser.id) throw new Error("This token belongs to a different ClickUp user.");
         return true;
     },
 
@@ -981,9 +998,10 @@ export default {
 
     /*
      * Builds hierarchy of spaces, folders, and lists WITHOUT tasks
-     * Used for hierarchy selection UI in settings
+     * Used for hierarchy selection UI in settings.
+     * onProgress(done, total), optional, counts the per-space requests.
      */
-    async getHierarchyMetadata() {
+    async getHierarchyMetadata(onProgress) {
         this.requests = 0;
         const startedAt = performance.now();
         const pausesBefore = _rateLimitPauses;
@@ -995,6 +1013,11 @@ export default {
         console.log(`Got ${spaces.length} spaces from ClickUp (${this.requests} rq)`);
 
         if (spaces.length > 0) {
+            // Two requests per space: its folders (with lists inline), its folderless lists
+            const totalSteps = spaces.length * 2;
+            let doneSteps = 0;
+            const step = () => onProgress && onProgress(++doneSteps, totalSteps);
+
             await Promise.all(spaces.map(async (space) => {
                 console.log(`Getting folders and lists for space ${space.name} (${this.requests} rq)`);
 
@@ -1006,6 +1029,7 @@ export default {
                     return [];
                 });
                 console.log(`Got ${folders.length} folders for space ${space.name} (${this.requests} rq)`);
+                step();
 
                 if (folders.length > 0) {
                     space.addChildren(folders);
@@ -1017,6 +1041,7 @@ export default {
                     return [];
                 });
                 console.log(`Got ${lists.length} lists for space ${space.name} (${this.requests} rq)`);
+                step();
 
                 if (lists.length > 0) {
                     space.addChildren(lists);
@@ -1032,7 +1057,16 @@ export default {
         return [];
     },
 
-    async getCachedHierarchyMetadata() {
+    async getCachedHierarchyMetadata(onProgress) {
+        // A refresh arriving mid-walk joins it too: that walk is already fresh.
+        // Progress keeps going to whoever started the walk.
+        if (_metadataInFlight) return _metadataInFlight;
+        _metadataInFlight = this._loadCachedHierarchyMetadata(onProgress)
+            .finally(() => { _metadataInFlight = null; });
+        return _metadataInFlight;
+    },
+
+    async _loadCachedHierarchyMetadata(onProgress) {
         try {
             const cached = cache.get(HIERARCHY_METADATA_CACHE_KEY)
 
@@ -1045,7 +1079,17 @@ export default {
             // zero this walk's failure count
             const failedBefore = this.failedFetches
 
-            let metadata = await this.getHierarchyMetadata()
+            // No request completes during a rate-limit pause, so also report on a
+            // timer — that is what lets the page show the wait instead of freezing
+            let latest = {done: 0, total: 0};
+            const report = () => onProgress && onProgress({...latest, waitSeconds: _rateLimitWaitSeconds()});
+            const ticker = onProgress ? setInterval(report, 1000) : null;
+            let metadata;
+            try {
+                metadata = await this.getHierarchyMetadata((done, total) => { latest = {done, total}; report(); })
+            } finally {
+                clearInterval(ticker)
+            }
 
             if (this.failedFetches > failedBefore) {
                 throw new Error(`Hierarchy metadata fetch incomplete: ${this.failedFetches - failedBefore} request(s) failed after retries; not caching partial data`)
