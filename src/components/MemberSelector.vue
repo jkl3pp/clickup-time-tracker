@@ -28,6 +28,7 @@
                                 :src="user.profilePicture"
                                 :size="48"
                                 class="mx-1 transition shrink-0 hover:scale-125"
+                                style="-webkit-app-region: no-drag"
                                 round
                             >
                                 <slot v-if="!user.profilePicture" name="placeholder">{{ user.initials }}</slot>
@@ -111,6 +112,7 @@ export default {
     background: rgba(255, 255, 255, 0.2);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
+    -webkit-app-region: drag;
 }
 
 /* Member selection transition */
