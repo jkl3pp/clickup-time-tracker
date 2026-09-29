@@ -193,10 +193,15 @@ let _hierarchyInFlight = null;
 // second one, and two at once pushed both tokens into a 60 s rate-limit pause.
 let _metadataInFlight = null;
 
+// Bump when the sweeps start returning different tasks for the same selection;
+// the fingerprint changes with it, so the next open does one full sync.
+// 2: include_timl (tasks added to a selected list from elsewhere)
+const HIERARCHY_SWEEP_VERSION = 2;
+
 // Cheap stable digest of the saved selection — a delta is only valid while the
 // scope it was fetched for is unchanged
 function _selectionFingerprint(selection) {
-    const json = JSON.stringify(selection || null);
+    const json = `${HIERARCHY_SWEEP_VERSION}:${JSON.stringify(selection || null)}`;
     let hash = 5381;
     for (let i = 0; i < json.length; i++) {
         hash = ((hash * 33) ^ json.charCodeAt(i)) >>> 0;
@@ -545,16 +550,21 @@ export default {
      * Sweep all pages of /team/{id}/task for the given filter params
      * (e.g. ['project_ids[]=123', 'project_ids[]=456']).
      * Returns raw task objects; subtasks arrive as flat entries with .parent set.
+     * include_timl is undocumented for this endpoint but honoured (verified
+     * 2026-09-28): tasks added to an in-scope list from elsewhere come back too.
      */
     async _sweepTeamTasks(filterPairs) {
-        const base = ['subtasks=true', 'include_closed=true'].concat(filterPairs);
+        const base = ['subtasks=true', 'include_closed=true', 'include_timl=true'].concat(filterPairs);
         const tasks = [];
         let page = 0;
         for (;;) {
             const body = await this.withTimeoutAndRetry(() => this._getTeamTaskPage(base, page));
-            tasks.push(...(body.tasks || []));
-            // The API's own end-of-results flag; anything else means done
-            if (body.last_page === false) page++;
+            const pageTasks = body.tasks || [];
+            tasks.push(...pageTasks);
+            // With include_timl, last_page can say true on a full page that has
+            // more after it (seen 2026-09-28: page 23 full and "last", page 24
+            // had 10 more), so only a short page (under 100) ends the sweep
+            if (body.last_page === false || pageTasks.length >= 100) page++;
             else break;
         }
         return tasks;
@@ -624,12 +634,24 @@ export default {
     },
 
     /*
+     * For a task whose home list isn't selected: the first list it was added to
+     * that is in the tree, or null. locations[] carries only {id, name}, so
+     * "selected" means "known" — after a full sync that is every list of the
+     * selected folders plus the explicitly selected ones.
+     */
+    _addedToKnownListId(task, knownListIds) {
+        const location = (task.locations || []).find(loc => knownListIds.has(loc.id));
+        return location ? location.id : null;
+    },
+
+    /*
      * Internal: Fetches filtered hierarchy based on user selection.
      * Instead of walking space → folder → list → tasks (hundreds of requests),
      * this sweeps GET /team/{id}/task scoped to the selection — tasks carry
      * their space/folder/list inline, so the tree is rebuilt from task payloads
      * plus one getSpaces call and one getFolderedLists call per selected folder.
-     * Tasks are placed by their home list only; a list with zero tasks still
+     * Tasks are placed by their home list, or — when that isn't selected — by a
+     * selected list they were added to (include_timl); a list with zero tasks still
      * appears when it was prefetched or explicitly selected, so the task
      * creator can create into it.
      */
@@ -689,10 +711,15 @@ export default {
             });
         }
 
-        // Bucket in-scope tasks by their home list
+        // Bucket in-scope tasks by their home list. Tasks whose home isn't
+        // selected (swept via include_timl) wait until every list is known.
         const tasksByListId = new Map();
+        const addedElsewhere = [];
         for (const task of rawTasksById.values()) {
-            if (!this._taskMatchesSelection(task, selection)) continue;
+            if (!this._taskMatchesSelection(task, selection)) {
+                addedElsewhere.push(task);
+                continue;
+            }
             if (!tasksByListId.has(task.list.id)) tasksByListId.set(task.list.id, []);
             tasksByListId.get(task.list.id).push(task);
         }
@@ -714,6 +741,15 @@ export default {
                 }
                 listNodesById.set(listId, { node: listNode, parentType: 'folder', parentId: sample.folder.id });
             }
+        }
+
+        // Tasks added to a selected list from elsewhere: shown once, under the
+        // first such list. Anything else the sweep returned is out of scope.
+        for (const task of addedElsewhere) {
+            const listId = this._addedToKnownListId(task, listNodesById);
+            if (!listId) continue;
+            if (!tasksByListId.has(listId)) tasksByListId.set(listId, []);
+            tasksByListId.get(listId).push(task);
         }
 
         // Attach tasks to lists, then assemble lists → folders → spaces.
@@ -888,17 +924,23 @@ export default {
         for (const raw of ordered) {
             const existing = index.tasks.get(raw.id);
 
-            // Swept but no longer selected — it moved out of scope, so drop it
-            if (!this._taskMatchesSelection(raw, selection)) {
-                if (existing) {
-                    detach(existing);
-                    stats.removed++;
+            let listEntry;
+            if (this._taskMatchesSelection(raw, selection)) {
+                listEntry = ensureList(raw);
+                if (!listEntry) return null;
+            } else {
+                // Home not selected, but added to a list we show (include_timl)
+                const addedToId = this._addedToKnownListId(raw, index.lists);
+                // Swept but selected by neither route — it moved out of scope, so drop it
+                if (!addedToId) {
+                    if (existing) {
+                        detach(existing);
+                        stats.removed++;
+                    }
+                    continue;
                 }
-                continue;
+                listEntry = index.lists.get(addedToId);
             }
-
-            const listEntry = ensureList(raw);
-            if (!listEntry) return null;
 
             // Subtasks hang off their parent when we have it, otherwise off the
             // list — degraded but visible, which beats vanishing
@@ -908,7 +950,7 @@ export default {
                 if (parentEntry) container = parentEntry.node;
             }
 
-            const spaceColor = (index.spaces.get(raw.space.id) || {}).color;
+            const spaceColor = (index.spaces.get(listEntry.spaceId) || {}).color;
 
             if (existing) {
                 this._applyTaskFields(existing.node, raw, spaceColor);
